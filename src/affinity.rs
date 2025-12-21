@@ -1,13 +1,11 @@
 use core_affinity::CoreId;
 
 pub(crate) fn cpu_has_core_else_panic(id: usize) {
-    let available: Vec<usize> = core_affinity::get_core_ids()
-        .unwrap()
-        .iter()
-        .map(|core_id| core_id.id)
-        .collect();
+    let has_core = core_affinity::get_core_ids()
+        .map(|ids| ids.iter().any(|core_id| core_id.id == id))
+        .unwrap_or(false);
 
-    if !available.contains(&id) {
+    if !has_core {
         panic!("No core with ID={} is available.", id);
     }
 }

@@ -74,10 +74,14 @@ impl Barrier for MultiConsumerBarrier {
     /// Gets the available `Sequence` of the slowest consumer.
     #[inline]
     fn get_after(&self, _lower_bound: Sequence) -> Sequence {
-        self.cursors.iter().fold(i64::MAX, |min_sequence, cursor| {
+        let mut min_sequence = i64::MAX;
+        for cursor in &self.cursors {
             let sequence = cursor.relaxed_value();
-            std::cmp::min(sequence, min_sequence)
-        })
+            if sequence < min_sequence {
+                min_sequence = sequence;
+            }
+        }
+        min_sequence
     }
 }
 
@@ -96,16 +100,53 @@ impl MultiConsumerDependentsBarrier {
 impl Barrier for MultiConsumerDependentsBarrier {
     #[inline]
     fn get_after(&self, _lower_bound: Sequence) -> Sequence {
-        let consumer_min = self.cursors.iter().fold(i64::MAX, |min_sequence, cursor| {
+        let mut min_sequence = i64::MAX;
+        for cursor in &self.cursors {
             let sequence = cursor.relaxed_value();
-            std::cmp::min(sequence, min_sequence)
-        });
-        self.dependent_sequences
-            .iter()
-            .fold(consumer_min, |min_sequence, seq| {
-                let sequence = seq.get();
-                std::cmp::min(sequence, min_sequence)
-            })
+            if sequence < min_sequence {
+                min_sequence = sequence;
+            }
+        }
+        for seq in &self.dependent_sequences {
+            let sequence = seq.get();
+            if sequence < min_sequence {
+                min_sequence = sequence;
+            }
+        }
+        min_sequence
+    }
+}
+
+fn run_processor_loop<E, B>(
+    waiter: &mut impl Waiter,
+    mut on_event: impl FnMut(&E, Sequence, bool),
+    barrier: &B,
+    shutdown_at_sequence: &crossbeam_utils::CachePadded<std::sync::atomic::AtomicI64>,
+    ring_buffer: &crate::ringbuffer::RingBuffer<E>,
+    consumer_cursor: &Cursor,
+    notifier: &impl WakeupNotifier,
+) where
+    B: Barrier,
+{
+    let mut sequence = 0;
+    loop {
+        let available = match waiter.wait_for(sequence, barrier, shutdown_at_sequence) {
+            WaitOutcome::Available { upper } => upper,
+            WaitOutcome::Shutdown => break,
+            WaitOutcome::Timeout => continue,
+        };
+        while available >= sequence {
+            let end_of_batch = available == sequence;
+            // SAFETY: Now, we have (shared) read access to the event at `sequence`.
+            let event_ptr = ring_buffer.get(sequence);
+            let event = unsafe { &*event_ptr };
+            on_event(event, sequence, end_of_batch);
+            sequence += 1;
+        }
+        // Signal to producers or later consumers that we're done processing `sequence - 1`.
+        consumer_cursor.store(sequence - 1);
+        // Wake any blocking waiters that might be gated on this consumer's progress.
+        notifier.wake();
     }
 }
 
@@ -134,32 +175,17 @@ where
             .spawn(move || {
                 set_affinity_if_defined(affinity, thread_name.as_str());
                 let mut waiter = wait_strategy.new_waiter();
-                let mut sequence = 0;
-                loop {
-                    let available = match waiter.wait_for(
-                        sequence,
-                        barrier.as_ref(),
-                        shutdown_at_sequence.as_ref(),
-                    ) {
-                        WaitOutcome::Available { upper } => upper,
-                        WaitOutcome::Shutdown => break,
-                        WaitOutcome::Timeout => continue,
-                    };
-                    while available >= sequence {
-                        // Potential batch processing.
-                        let end_of_batch = available == sequence;
-                        // SAFETY: Now, we have (shared) read access to the event at `sequence`.
-                        let event_ptr = ring_buffer.get(sequence);
-                        let event = unsafe { &*event_ptr };
-                        event_handler.on_event(event, sequence, end_of_batch);
-                        // Update next sequence to read.
-                        sequence += 1;
-                    }
-                    // Signal to producers or later consumers that we're done processing `sequence - 1`.
-                    consumer_cursor.store(sequence - 1);
-                    // Wake any blocking waiters that might be gated on this consumer's progress.
-                    notifier.wake();
-                }
+                run_processor_loop(
+                    &mut waiter,
+                    |event, sequence, end_of_batch| {
+                        event_handler.on_event(event, sequence, end_of_batch)
+                    },
+                    barrier.as_ref(),
+                    shutdown_at_sequence.as_ref(),
+                    ring_buffer.as_ref(),
+                    consumer_cursor.as_ref(),
+                    &notifier,
+                );
             })
             .expect("Should spawn thread.")
     };
@@ -195,33 +221,18 @@ where
             .spawn(move || {
                 set_affinity_if_defined(affinity, thread_name.as_str());
                 let mut waiter = wait_strategy.new_waiter();
-                let mut sequence = 0;
                 let mut state = initialize_state();
-                loop {
-                    let available_sequence = match waiter.wait_for(
-                        sequence,
-                        barrier.as_ref(),
-                        shutdown_at_sequence.as_ref(),
-                    ) {
-                        WaitOutcome::Available { upper } => upper,
-                        WaitOutcome::Shutdown => break,
-                        WaitOutcome::Timeout => continue,
-                    };
-                    while available_sequence >= sequence {
-                        // Potential batch processing.
-                        let end_of_batch = available_sequence == sequence;
-                        // SAFETY: Now, we have (shared) read access to the event at `sequence`.
-                        let event_ptr = ring_buffer.get(sequence);
-                        let event = unsafe { &*event_ptr };
-                        event_handler.on_event(&mut state, event, sequence, end_of_batch);
-                        // Update next sequence to read.
-                        sequence += 1;
-                    }
-                    // Signal to producers or later consumers that we're done processing `sequence - 1`.
-                    consumer_cursor.store(sequence - 1);
-                    // Wake any blocking waiters that might be gated on this consumer's progress.
-                    notifier.wake();
-                }
+                run_processor_loop(
+                    &mut waiter,
+                    |event, sequence, end_of_batch| {
+                        event_handler.on_event(&mut state, event, sequence, end_of_batch)
+                    },
+                    barrier.as_ref(),
+                    shutdown_at_sequence.as_ref(),
+                    ring_buffer.as_ref(),
+                    consumer_cursor.as_ref(),
+                    &notifier,
+                );
             })
             .expect("Should spawn thread.")
     };

@@ -19,9 +19,16 @@ use std::{
 
 use super::{MissingFreeSlots, MutBatchIter};
 
+type AvailableWord = CachePadded<AtomicU64>;
+
+#[inline]
+fn new_available_word(v: u64) -> AvailableWord {
+    CachePadded::new(AtomicU64::new(v))
+}
+
 struct SharedProducer {
-    consumers: Vec<Consumer>,
-    counter: AtomicI64,
+    consumers: Mutex<Vec<Consumer>>,
+    ref_count: AtomicI64,
 }
 
 /// Producer for publishing to the Disruptor from multiple threads.
@@ -35,7 +42,7 @@ where
 {
     shutdown_at_sequence: Arc<CachePadded<AtomicI64>>,
     ring_buffer: Arc<RingBuffer<E>>,
-    shared_producer: Arc<Mutex<SharedProducer>>,
+    shared_producer: Arc<SharedProducer>,
     producer_barrier: Arc<MultiProducerBarrier>,
     consumer_barrier: Arc<C>,
     notifier: W::Notifier,
@@ -73,14 +80,9 @@ where
     }
 
     #[inline]
-    fn try_batch_publish<'a, F>(
-        &'a mut self,
-        n: usize,
-        update: F,
-    ) -> Result<Sequence, MissingFreeSlots>
+    fn try_batch_publish<F>(&mut self, n: usize, update: F) -> Result<Sequence, MissingFreeSlots>
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>),
+        F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
         self.next_sequences(n)?;
         let sequence = self.apply_updates(n, update);
@@ -88,10 +90,9 @@ where
     }
 
     #[inline]
-    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F)
+    fn batch_publish<F>(&mut self, n: usize, update: F)
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>),
+        F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
         while self.next_sequences(n).is_err() {
             hint::spin_loop();
@@ -106,8 +107,10 @@ where
     W: WaitStrategy,
 {
     fn clone(&self) -> Self {
-        let shared = self.shared_producer.lock().unwrap();
-        let count = shared.counter.fetch_add(1, Ordering::AcqRel);
+        let count = self
+            .shared_producer
+            .ref_count
+            .fetch_add(1, Ordering::AcqRel);
 
         // Cloning publishers and calling `mem::forget` on the clones could potentially overflow the
         // counter. It's very difficult to recover sensibly from such degenerate scenarios so we
@@ -142,15 +145,18 @@ where
     W: WaitStrategy,
 {
     fn drop(&mut self) {
-        let mut shared = self.shared_producer.lock().unwrap();
-        let old_count = shared.counter.fetch_sub(1, Ordering::AcqRel);
+        let old_count = self
+            .shared_producer
+            .ref_count
+            .fetch_sub(1, Ordering::AcqRel);
         if old_count == 1 {
             // All consumers are waiting to read the next sequence.
             let sequence = self.producer_barrier.current() + 1;
             self.shutdown_at_sequence.store(sequence, Ordering::Relaxed);
             // Wake any blocking consumers so they can observe shutdown promptly.
             self.notifier.wake();
-            shared.consumers.iter_mut().for_each(|c| c.join());
+            let mut consumers = self.shared_producer.consumers.lock().unwrap();
+            consumers.iter_mut().for_each(|c| c.join());
         }
     }
 }
@@ -168,10 +174,10 @@ where
         consumer_barrier: C,
         notifier: W::Notifier,
     ) -> Self {
-        let shared_producer = Arc::new(Mutex::new(SharedProducer {
-            consumers,
-            counter: AtomicI64::new(1),
-        }));
+        let shared_producer = Arc::new(SharedProducer {
+            consumers: Mutex::new(consumers),
+            ref_count: AtomicI64::new(1),
+        });
         let consumer_barrier = Arc::new(consumer_barrier);
         // Known to be available initially as consumers start at index 0.
         let sequence_clear_of_consumers = ring_buffer.size() - 1;
@@ -247,10 +253,9 @@ where
 
     /// Precondition: `sequence` and previous `n - 1` sequences are available for publication.
     #[inline]
-    fn apply_updates<'a, F>(&'a mut self, n: usize, updates: F) -> Sequence
+    fn apply_updates<F>(&mut self, n: usize, updates: F) -> Sequence
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>),
+        F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
         let n = n as i64;
         let upper = self.claimed_sequence;
@@ -274,10 +279,12 @@ pub struct MultiProducerBarrier {
     /// AtomicU64s each track availability of 64 slots.
     /// Each bit in the AtomicU64 encodes whether the slot was published in an even or odd round.
     /// This way producers avoid coordinating directly (with the added overhead that would have).
+    ///
+    /// Each word is cache-line padded to reduce false sharing between producers.
     /// Note, producers can never "overtake" each other and overwrite the availability of an event
     /// in the "previous" round as all producers must wait for the consumer furtherst behind (which
     /// is again blocked by the slowest producer).
-    available: Box<[AtomicU64]>,
+    available: Box<[AvailableWord]>,
     index_mask: usize,
     index_shift: usize,
 }
@@ -297,7 +304,9 @@ impl MultiProducerBarrier {
         // and 0 means latest even round. A ring buffer starts with round 0 (an even round)
         // so that is why we initialize with all 1's as nothing is published initially.
         let all_ones = !0_u64;
-        let available = (0..i64_needed).map(|_i| AtomicU64::new(all_ones)).collect();
+        let available = (0..i64_needed)
+            .map(|_i| new_available_word(all_ones))
+            .collect();
         let index_mask = size - 1;
         let index_shift = Self::log2(size);
 
@@ -328,7 +337,7 @@ impl MultiProducerBarrier {
     fn calculate_availability_indices(&self, sequence: Sequence) -> (usize, usize) {
         let slot_index = self.slot_index(sequence);
         let availability_index = slot_index >> 6; // == divide by 64.
-        let bit_index = slot_index - availability_index * 64;
+        let bit_index = slot_index & 63;
         (availability_index, bit_index)
     }
 
@@ -345,7 +354,7 @@ impl MultiProducerBarrier {
     }
 
     #[inline]
-    fn availability_at(&self, index: usize) -> &AtomicU64 {
+    fn availability_at(&self, index: usize) -> &AvailableWord {
         // SAFETY: Index is always calculated with `calculate_availability_index` and is therefore within bounds.
         unsafe { self.available.get_unchecked(index) }
     }

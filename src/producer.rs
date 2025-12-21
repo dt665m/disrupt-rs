@@ -77,6 +77,14 @@ impl<'a, E> Iterator for MutBatchIter<'a, E> {
     }
 }
 
+impl<E> ExactSizeIterator for MutBatchIter<'_, E> {
+    fn len(&self) -> usize {
+        self.remaining()
+    }
+}
+
+impl<E> std::iter::FusedIterator for MutBatchIter<'_, E> {}
+
 /// Producer used for publishing into the Disruptor.
 ///
 /// A `Producer` has two pairs of methods for publication:
@@ -163,14 +171,9 @@ pub trait Producer<E> {
     /// ```
     ///
     /// See also [`Self::batch_publish`] and [`Self::try_publish`].
-    fn try_batch_publish<'a, F>(
-        &'a mut self,
-        n: usize,
-        update: F,
-    ) -> Result<Sequence, MissingFreeSlots>
+    fn try_batch_publish<F>(&mut self, n: usize, update: F) -> Result<Sequence, MissingFreeSlots>
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>);
+        F: for<'a> FnOnce(MutBatchIter<'a, E>);
 
     /// Publish an Event into the Disruptor.
     ///
@@ -226,8 +229,7 @@ pub trait Producer<E> {
     /// ```
     ///
     /// See also [`Self::try_batch_publish`] and [`Self::publish`].
-    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F)
+    fn batch_publish<F>(&mut self, n: usize, update: F)
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>);
+        F: for<'a> FnOnce(MutBatchIter<'a, E>);
 }

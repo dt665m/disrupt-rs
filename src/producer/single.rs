@@ -63,14 +63,9 @@ where
     }
 
     #[inline]
-    fn try_batch_publish<'a, F>(
-        &'a mut self,
-        n: usize,
-        update: F,
-    ) -> Result<Sequence, MissingFreeSlots>
+    fn try_batch_publish<F>(&mut self, n: usize, update: F) -> Result<Sequence, MissingFreeSlots>
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>),
+        F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
         self.next_sequences(n)?;
         let sequence = self.apply_updates(n, update);
@@ -78,10 +73,9 @@ where
     }
 
     #[inline]
-    fn batch_publish<'a, F>(&'a mut self, n: usize, update: F)
+    fn batch_publish<F>(&mut self, n: usize, update: F)
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>),
+        F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
         while self.next_sequences(n).is_err() {
             hint::spin_loop();
@@ -165,10 +159,9 @@ where
 
     /// Precondition: `sequence` and next `n - 1` sequences are available for publication.
     #[inline]
-    fn apply_updates<'a, F>(&'a mut self, n: usize, updates: F) -> Sequence
+    fn apply_updates<F>(&mut self, n: usize, updates: F) -> Sequence
     where
-        E: 'a,
-        F: FnOnce(MutBatchIter<'a, E>),
+        F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
         let n = n as i64;
         let lower = self.sequence;

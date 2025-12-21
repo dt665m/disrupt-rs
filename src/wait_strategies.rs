@@ -15,17 +15,6 @@ use crate::{barrier::Barrier, Sequence};
 use crossbeam_utils::CachePadded;
 use parking_lot::{Condvar, Mutex};
 
-/// Error/alert conditions a waiter can encounter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WaitError {
-    /// The disruptor is shutting down; consumer should stop.
-    Shutdown,
-    /// A wait timed out without progress.
-    Timeout,
-    /// The wait was interrupted (e.g. by a spurious wakeup or external signal).
-    Interrupted,
-}
-
 /// Outcome of waiting for availability.
 pub enum WaitOutcome {
     /// Highest contiguous sequence available (inclusive).
@@ -186,7 +175,6 @@ struct LiteBlockingInner {
     mutex: Mutex<u64>,
     condvar: Condvar,
     signal_needed: AtomicBool,
-    waiters: std::sync::atomic::AtomicUsize,
 }
 
 /// Per-consumer waiter for [`LiteBlockingWaitStrategy`].
@@ -266,9 +254,7 @@ impl Waiter for LiteBlockingWaiter {
                     return WaitOutcome::Available { upper: available };
                 }
 
-                self.inner.waiters.fetch_add(1, Ordering::Relaxed);
                 self.inner.condvar.wait(&mut epoch_guard);
-                self.inner.waiters.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -561,12 +547,10 @@ mod tests {
     fn lite_blocking_wait_strategy_skips_wake_when_no_waiters() {
         let strategy = LiteBlockingWaitStrategy::default();
         let notifier = strategy.notifier();
-        assert_eq!(strategy.inner.waiters.load(Ordering::Relaxed), 0);
         assert!(!strategy.inner.signal_needed.load(Ordering::Relaxed));
 
         // Should be a cheap no-op: nobody is waiting.
         notifier.wake();
-        assert_eq!(strategy.inner.waiters.load(Ordering::Relaxed), 0);
         assert!(!strategy.inner.signal_needed.load(Ordering::Relaxed));
     }
 
@@ -594,6 +578,5 @@ mod tests {
 
         let outcome = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(outcome, WaitOutcome::Available { upper: 1 }));
-        assert_eq!(strategy.inner.waiters.load(Ordering::Relaxed), 0);
     }
 }

@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, ptr::NonNull};
 
 use crate::Sequence;
 
-unsafe impl<E> Sync for RingBuffer<E> {}
+unsafe impl<E: Sync> Sync for RingBuffer<E> {}
 
 #[doc(hidden)]
 pub struct RingBuffer<E> {
