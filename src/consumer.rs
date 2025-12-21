@@ -51,6 +51,20 @@ pub struct MultiConsumerDependentsBarrier {
     dependent_sequences: Vec<Arc<DependentSequence>>,
 }
 
+#[inline]
+fn min_cursor_sequence(cursors: &[Arc<Cursor>]) -> Sequence {
+    let mut iter = cursors.iter();
+    let Some(first) = iter.next() else {
+        return i64::MAX;
+    };
+
+    let mut min_sequence = first.relaxed_value();
+    for cursor in iter {
+        min_sequence = min_sequence.min(cursor.relaxed_value());
+    }
+    min_sequence
+}
+
 impl SingleConsumerBarrier {
     pub(crate) fn new(cursor: Arc<Cursor>) -> Self {
         Self { cursor }
@@ -74,14 +88,7 @@ impl Barrier for MultiConsumerBarrier {
     /// Gets the available `Sequence` of the slowest consumer.
     #[inline]
     fn get_after(&self, _lower_bound: Sequence) -> Sequence {
-        let mut min_sequence = i64::MAX;
-        for cursor in &self.cursors {
-            let sequence = cursor.relaxed_value();
-            if sequence < min_sequence {
-                min_sequence = sequence;
-            }
-        }
-        min_sequence
+        min_cursor_sequence(&self.cursors)
     }
 }
 
@@ -100,18 +107,10 @@ impl MultiConsumerDependentsBarrier {
 impl Barrier for MultiConsumerDependentsBarrier {
     #[inline]
     fn get_after(&self, _lower_bound: Sequence) -> Sequence {
-        let mut min_sequence = i64::MAX;
-        for cursor in &self.cursors {
-            let sequence = cursor.relaxed_value();
-            if sequence < min_sequence {
-                min_sequence = sequence;
-            }
-        }
+        let mut min_sequence = min_cursor_sequence(&self.cursors);
         for seq in &self.dependent_sequences {
             let sequence = seq.get();
-            if sequence < min_sequence {
-                min_sequence = sequence;
-            }
+            min_sequence = min_sequence.min(sequence);
         }
         min_sequence
     }
@@ -128,15 +127,17 @@ fn run_processor_loop<E, B>(
 ) where
     B: Barrier,
 {
-    let mut sequence = 0;
+    let mut sequence: Sequence = 0;
     loop {
-        let available = match waiter.wait_for(sequence, barrier, shutdown_at_sequence) {
+        let next_sequence = sequence;
+        let available = match waiter.wait_for(next_sequence, barrier, shutdown_at_sequence) {
             WaitOutcome::Available { upper } => upper,
             WaitOutcome::Shutdown => break,
             WaitOutcome::Timeout => continue,
         };
+        debug_assert!(available >= next_sequence);
         while available >= sequence {
-            let end_of_batch = available == sequence;
+            let end_of_batch = sequence == available;
             // SAFETY: Now, we have (shared) read access to the event at `sequence`.
             let event_ptr = unsafe { ring_buffer.get(sequence).as_ptr() };
             let event = unsafe { &*event_ptr };

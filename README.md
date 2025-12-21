@@ -375,6 +375,16 @@ Although the absence of bugs cannot be guaranteed, these approaches have been us
 - All tests are run on Miri in CI/CD.
 - Verification in TLA+ (see the `verification/` folder).
 
+## Important Limitations / Failure Modes
+
+- **Sequence number limit:** sequence numbers are `i64` and the library does not guard against
+  publishing more than `2^63 - 1` events over the lifetime of a Disruptor instance. Exceeding this
+  limit is **undefined behavior** (kept unchecked for performance).
+- **Consumer panics:** if a consumer thread panics (e.g. inside your event handler), shutdown will
+  panic when the library joins that thread.
+- **Multi-producer clone misuse:** degenerate misuse (e.g. cloning and `mem::forget`-ing clones in a
+  loop) can force the process to abort in order to avoid refcount overflow.
+
 # Performance
 
 The SPSC and MPSC Disruptor variants have been benchmarked and compared to Crossbeam. See the code in the `benches/spsc.rs` and `benches/mpsc.rs` files.

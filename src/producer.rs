@@ -36,6 +36,7 @@ pub struct MutBatchIter<'a, E> {
 }
 
 impl<'a, E> MutBatchIter<'a, E> {
+    #[inline]
     fn new(start: Sequence, end: Sequence, ring_buffer: &'a RingBuffer<E>) -> Self {
         Self {
             ring_buffer,
@@ -44,20 +45,26 @@ impl<'a, E> MutBatchIter<'a, E> {
         }
     }
 
+    #[inline]
     fn remaining(&self) -> usize {
-        (self.last - self.current + 1) as usize
+        if self.current > self.last {
+            0
+        } else {
+            (self.last - self.current + 1) as usize
+        }
     }
 }
 
 impl<'a, E> Iterator for MutBatchIter<'a, E> {
     type Item = &'a mut E;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current > self.last {
             None
         } else {
             let event_ptr = unsafe { self.ring_buffer.get(self.current).as_ptr() };
-            // Safety: Iterator has exclusive access to event.
+            // SAFETY: The producer has reserved this slot and the iterator yields each slot once.
             let event = unsafe { &mut *event_ptr };
             self.current += 1;
             Some(event)
@@ -69,6 +76,7 @@ impl<'a, E> Iterator for MutBatchIter<'a, E> {
         (remaining, Some(remaining))
     }
 
+    #[inline]
     fn count(self) -> usize
     where
         Self: Sized,
@@ -78,6 +86,7 @@ impl<'a, E> Iterator for MutBatchIter<'a, E> {
 }
 
 impl<E> ExactSizeIterator for MutBatchIter<'_, E> {
+    #[inline]
     fn len(&self) -> usize {
         self.remaining()
     }
