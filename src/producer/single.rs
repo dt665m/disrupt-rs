@@ -97,7 +97,7 @@ where
         consumer_barrier: C,
         notifier: W::Notifier,
     ) -> Self {
-        let sequence_clear_of_consumers = ring_buffer.size() - 1;
+        let sequence_clear_of_consumers = ring_buffer.capacity() - 1;
         Self {
             shutdown_at_sequence,
             ring_buffer,
@@ -121,17 +121,17 @@ where
             // (The slowest consumer is too far behind the producer to publish next n events).
             let last_published = self.sequence - 1;
             let rear_sequence_read = self.consumer_barrier.get_after(last_published);
-            let free_slots = self
+            let available_capacity = self
                 .ring_buffer
-                .free_slots(last_published, rear_sequence_read);
-            if free_slots < n {
-                return Err(MissingFreeSlots((n - free_slots) as u64));
+                .available_capacity(last_published, rear_sequence_read);
+            if available_capacity < n {
+                return Err(MissingFreeSlots((n - available_capacity) as u64));
             }
             fence(Ordering::Acquire);
 
             // We can now continue until we get right behind the slowest consumer's current
             // position without checking where it actually is.
-            self.sequence_clear_of_consumers = last_published + free_slots;
+            self.sequence_clear_of_consumers = last_published + available_capacity;
         }
 
         Ok(n_next)
@@ -146,7 +146,7 @@ where
         let sequence = self.sequence;
         // SAFETY: Now, we have exclusive access to the event at `sequence` and a producer
         // can now update the data.
-        let event_ptr = self.ring_buffer.get(sequence);
+        let event_ptr = unsafe { self.ring_buffer.get(sequence).as_ptr() };
         let event = unsafe { &mut *event_ptr };
         update(event);
         // Publish by publishing `sequence`.

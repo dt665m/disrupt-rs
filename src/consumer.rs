@@ -138,7 +138,7 @@ fn run_processor_loop<E, B>(
         while available >= sequence {
             let end_of_batch = available == sequence;
             // SAFETY: Now, we have (shared) read access to the event at `sequence`.
-            let event_ptr = ring_buffer.get(sequence);
+            let event_ptr = unsafe { ring_buffer.get(sequence).as_ptr() };
             let event = unsafe { &*event_ptr };
             on_event(event, sequence, end_of_batch);
             sequence += 1;

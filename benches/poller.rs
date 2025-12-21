@@ -54,12 +54,15 @@ fn base(group: &mut BenchmarkGroup<WallTime>, burst_size: i64) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
+                sink.store(0, Ordering::Relaxed);
                 for data in 1..=*size {
-                    sink.store(black_box(data), Ordering::Release);
+                    sink.store(black_box(data), Ordering::Relaxed);
                 }
                 // Wait for the last data element to "be received".
                 let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != last_data {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })
@@ -81,7 +84,10 @@ fn polling(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str
             match poller.poll() {
                 Ok(mut events) => {
                     for event in &mut events {
-                        sink.store(event.data, Ordering::Release);
+                        // Only write once per burst: use a negative "token" on the last element.
+                        if event.data < 0 {
+                            sink.store(event.data, Ordering::Relaxed);
+                        }
                     }
                 }
                 Err(disruptor::Polling::NoEvents) => continue,
@@ -95,16 +101,21 @@ fn polling(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str
         b.iter_custom(|iters| {
             pause(*pause_ms);
             let start = Instant::now();
+            let mut token = 0_i64;
             for _ in 0..iters {
+                token -= 1; // negative token is unique per iteration
+                sink.store(0, Ordering::Relaxed);
                 producer.batch_publish(*size as usize, |iter| {
                     for (i, e) in iter.enumerate() {
-                        e.data = black_box(i as i64 + 1);
+                        let last = i + 1 == *size as usize;
+                        e.data = black_box(if last { token } else { i as i64 + 1 });
                     }
                 });
 
                 // Wait for the last data element to be received inside processor.
-                let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != token {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })
@@ -119,8 +130,10 @@ fn processing(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &
     let sink = Arc::new(AtomicI64::new(0));
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
-            sink.store(event.data, Ordering::Release);
+        move |event: &Event, _sequence: i64, end_of_batch: bool| {
+            if end_of_batch && event.data < 0 {
+                sink.store(event.data, Ordering::Relaxed);
+            }
         }
     };
     let mut producer = disruptor::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
@@ -131,15 +144,20 @@ fn processing(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &
         b.iter_custom(|iters| {
             pause(*pause_ms);
             let start = Instant::now();
+            let mut token = 0_i64;
             for _ in 0..iters {
+                token -= 1; // negative token is unique per iteration
+                sink.store(0, Ordering::Relaxed);
                 producer.batch_publish(*size as usize, |iter| {
                     for (i, e) in iter.enumerate() {
-                        e.data = black_box(i as i64 + 1);
+                        let last = i + 1 == *size as usize;
+                        e.data = black_box(if last { token } else { i as i64 + 1 });
                     }
                 });
                 // Wait for the last data element to be received inside processor.
-                let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != token {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })

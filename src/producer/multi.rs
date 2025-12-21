@@ -180,7 +180,7 @@ where
         });
         let consumer_barrier = Arc::new(consumer_barrier);
         // Known to be available initially as consumers start at index 0.
-        let sequence_clear_of_consumers = ring_buffer.size() - 1;
+        let sequence_clear_of_consumers = ring_buffer.capacity() - 1;
         MultiProducer {
             shutdown_at_sequence,
             ring_buffer,
@@ -206,15 +206,17 @@ where
                 // publish into the slot currently being read by the slowest consumer.
                 // (Consumer is too far behind the producer to publish next n events).
                 let rear_sequence_read = self.consumer_barrier.get_after(current);
-                let free_slots = self.ring_buffer.free_slots(current, rear_sequence_read);
-                if free_slots < n {
-                    return Err(MissingFreeSlots((n - free_slots) as u64));
+                let available_capacity = self
+                    .ring_buffer
+                    .available_capacity(current, rear_sequence_read);
+                if available_capacity < n {
+                    return Err(MissingFreeSlots((n - available_capacity) as u64));
                 }
                 fence(Ordering::Acquire);
 
                 // We now know how far we can continue until we get right behind the slowest consumers'
                 // current position without checking where they actually are.
-                self.sequence_clear_of_consumers = current + free_slots;
+                self.sequence_clear_of_consumers = current + available_capacity;
             }
 
             match self.producer_barrier.compare_exchange(current, n_next) {
@@ -242,7 +244,7 @@ where
         let sequence = self.claimed_sequence;
         // SAFETY: Now, we have exclusive access to the event at `sequence` and a producer
         // can now update the data.
-        let event_ptr = self.ring_buffer.get(sequence);
+        let event_ptr = unsafe { self.ring_buffer.get(sequence).as_ptr() };
         let event = unsafe { &mut *event_ptr };
         update(event);
         // Make publication available by publishing `sequence`.

@@ -63,12 +63,15 @@ fn base(group: &mut BenchmarkGroup<WallTime>, burst_size: i64) {
         b.iter_custom(|iters| {
             let start = Instant::now();
             for _ in 0..iters {
+                sink.store(0, Ordering::Relaxed);
                 for data in 1..=*size {
-                    sink.store(black_box(data), Ordering::Release);
+                    sink.store(black_box(data), Ordering::Relaxed);
                 }
                 // Wait for the last data element to "be received".
                 let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != last_data {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })
@@ -83,7 +86,12 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
         let sink = Arc::clone(&sink);
         thread::spawn(move || loop {
             match r.try_recv() {
-                Ok(event) => sink.store(event.data, Ordering::Release),
+                Ok(event) => {
+                    // Only write once per burst: use a negative "token" on the last element.
+                    if event.data < 0 {
+                        sink.store(event.data, Ordering::Relaxed);
+                    }
+                }
                 Err(Empty) => continue,
                 Err(Disconnected) => break,
             }
@@ -94,8 +102,12 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
         b.iter_custom(|iters| {
             pause(*pause_ms);
             let start = Instant::now();
+            let mut token = 0_i64;
             for _ in 0..iters {
+                token -= 1; // negative token is unique per iteration
+                sink.store(0, Ordering::Relaxed);
                 for data in 1..=*size {
+                    let data = if data == *size { token } else { data };
                     let mut event = Event {
                         data: black_box(data),
                     };
@@ -107,8 +119,9 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
                     }
                 }
                 // Wait for the last data element to be received in the receiver thread.
-                let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != token {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })
@@ -122,8 +135,11 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
     let sink = Arc::new(AtomicI64::new(0));
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
-            sink.store(event.data, Ordering::Release);
+        move |event: &Event, _sequence: i64, end_of_batch: bool| {
+            // Only write once per burst: use a negative "token" on the last element.
+            if end_of_batch && event.data < 0 {
+                sink.store(event.data, Ordering::Relaxed);
+            }
         }
     };
     let mut producer = disruptor::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
@@ -134,15 +150,20 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
         b.iter_custom(|iters| {
             pause(*pause_ms);
             let start = Instant::now();
+            let mut token = 0_i64;
             for _ in 0..iters {
+                token -= 1; // negative token is unique per iteration
+                sink.store(0, Ordering::Relaxed);
                 producer.batch_publish(*size as usize, |iter| {
                     for (i, e) in iter.enumerate() {
-                        e.data = black_box(i as i64 + 1);
+                        let last = i + 1 == *size as usize;
+                        e.data = black_box(if last { token } else { i as i64 + 1 });
                     }
                 });
                 // Wait for the last data element to be received inside processor.
-                let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != token {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })
@@ -155,8 +176,10 @@ fn disruptor_liteblocking(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u6
     let sink = Arc::new(AtomicI64::new(0));
     let processor = {
         let sink = Arc::clone(&sink);
-        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
-            sink.store(event.data, Ordering::Release);
+        move |event: &Event, _sequence: i64, end_of_batch: bool| {
+            if end_of_batch && event.data < 0 {
+                sink.store(event.data, Ordering::Relaxed);
+            }
         }
     };
     let mut producer = disruptor::build_single_producer(
@@ -171,15 +194,20 @@ fn disruptor_liteblocking(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u6
         b.iter_custom(|iters| {
             pause(*pause_ms);
             let start = Instant::now();
+            let mut token = 0_i64;
             for _ in 0..iters {
+                token -= 1;
+                sink.store(0, Ordering::Relaxed);
                 producer.batch_publish(*size as usize, |iter| {
                     for (i, e) in iter.enumerate() {
-                        e.data = black_box(i as i64 + 1);
+                        let last = i + 1 == *size as usize;
+                        e.data = black_box(if last { token } else { i as i64 + 1 });
                     }
                 });
                 // Wait for the last data element to be received inside processor.
-                let last_data = black_box(*size);
-                while sink.load(Ordering::Acquire) != last_data {}
+                while sink.load(Ordering::Relaxed) != token {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })

@@ -88,7 +88,7 @@ impl<'g, E, B> Iterator for &'g mut EventGuard<'_, E, B> {
         }
 
         // SAFETY: The Guard is authorized to read up to and including `available` sequence.
-        let event_ptr = self.parent.ring_buffer.get(self.sequence);
+        let event_ptr = unsafe { self.parent.ring_buffer.get(self.sequence).as_ptr() };
         let event = unsafe { &*event_ptr };
         self.sequence += 1;
         Some(event)

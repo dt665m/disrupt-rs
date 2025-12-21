@@ -40,7 +40,7 @@ fn pause(millis: u64) {
 pub fn mpsc_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("mpsc");
     for burst_size in BURST_SIZES.into_iter() {
-        group.throughput(Throughput::Elements(burst_size));
+        group.throughput(Throughput::Elements(burst_size * PRODUCERS as u64));
 
         // Base: Benchmark overhead of measurement logic.
         base(&mut group, burst_size as i64);
@@ -128,10 +128,12 @@ fn run_benchmark(
             pause(*pause_ms);
             let start = Instant::now();
             for _ in 0..iters {
-                sink.store(0, Release);
+                sink.store(0, Relaxed);
                 burst_producers.iter().for_each(BurstProducer::start);
                 // Wait for all producers to finish publication.
-                while sink.load(Acquire) != count { /* Busy spin. */ }
+                while sink.load(Relaxed) != count {
+                    std::hint::spin_loop();
+                }
             }
             start.elapsed()
         })
@@ -177,7 +179,7 @@ fn crossbeam(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), param_des
             match r.try_recv() {
                 Ok(event) => {
                     black_box(event.data);
-                    sink.fetch_add(1, Release);
+                    sink.fetch_add(1, Relaxed);
                 }
                 Err(Empty) => continue,
                 Err(Disconnected) => break,
@@ -231,7 +233,7 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), param_des
         move |event: &Event, _sequence: i64, _end_of_batch: bool| {
             // Black box event to avoid dead code elimination.
             black_box(event.data);
-            sink.fetch_add(1, Release);
+            sink.fetch_add(1, Relaxed);
         }
     };
     let producer = disruptor::build_multi_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)

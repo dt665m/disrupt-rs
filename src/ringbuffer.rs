@@ -7,7 +7,8 @@ unsafe impl<E: Sync> Sync for RingBuffer<E> {}
 #[doc(hidden)]
 pub struct RingBuffer<E> {
     slots: Box<[UnsafeCell<E>]>,
-    index_mask: i64,
+    capacity: Sequence,
+    slot_mask: Sequence,
 }
 
 impl<E> RingBuffer<E> {
@@ -22,18 +23,32 @@ impl<E> RingBuffer<E> {
         let slots: Box<[UnsafeCell<E>]> = (0..size)
             .map(|_i| UnsafeCell::new(event_factory()))
             .collect();
-        let index_mask = (size - 1) as i64;
+        let capacity = size as Sequence;
+        let slot_mask = (size - 1) as Sequence;
 
-        RingBuffer { slots, index_mask }
+        RingBuffer {
+            slots,
+            capacity,
+            slot_mask,
+        }
     }
 
     #[inline]
     fn wrap_point(&self, sequence: Sequence) -> Sequence {
-        sequence - self.size()
+        sequence - self.capacity()
+    }
+
+    #[inline(always)]
+    fn slot_index(&self, sequence: Sequence) -> usize {
+        debug_assert!(
+            sequence >= 0,
+            "sequence must be non-negative when indexing into the ring buffer"
+        );
+        (sequence & self.slot_mask) as usize
     }
 
     #[inline]
-    pub(crate) fn free_slots(
+    pub(crate) fn available_capacity(
         &self,
         producer: Sequence,
         highest_read_by_consumers: Sequence,
@@ -45,25 +60,17 @@ impl<E> RingBuffer<E> {
     /// Callers must ensure that only a single mutable reference or multiple immutable references
     /// exist at any point in time.
     #[inline]
-    pub(crate) fn get(&self, sequence: Sequence) -> *mut E {
-        self.ptr(sequence).as_ptr()
-    }
-
-    /// Returns a non-null pointer to the slot for `sequence`.
-    ///
-    /// Callers must uphold the same aliasing guarantees as [`Self::get`].
-    #[inline(always)]
-    pub(crate) fn ptr(&self, sequence: Sequence) -> NonNull<E> {
-        let index = (sequence & self.index_mask) as usize;
-        // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
+    pub(crate) unsafe fn get(&self, sequence: Sequence) -> NonNull<E> {
+        let index = self.slot_index(sequence);
+        // SAFETY: Index is within bounds - guaranteed by invariant and slot mask.
         let slot = unsafe { self.slots.get_unchecked(index) };
         // SAFETY: `UnsafeCell::get()` returns a non-null pointer to the slot storage.
         unsafe { NonNull::new_unchecked(slot.get()) }
     }
 
     #[inline]
-    pub(crate) fn size(&self) -> i64 {
-        self.slots.len() as i64
+    pub(crate) fn capacity(&self) -> Sequence {
+        self.capacity
     }
 }
 
@@ -72,37 +79,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn free_slots() {
+    fn available_capacity() {
         let ring_buffer = RingBuffer::new(8, || 0);
 
         // Round 1:
         // Publisher has just published 7 and consumer has read 0.
-        assert_eq!(1, ring_buffer.free_slots(7, 0));
+        assert_eq!(1, ring_buffer.available_capacity(7, 0));
         // Consumer had read 0 and the publisher has just published 8.
-        assert_eq!(0, ring_buffer.free_slots(8, 0));
+        assert_eq!(0, ring_buffer.available_capacity(8, 0));
         // Producer has published 0 and comsumer read 0.
-        assert_eq!(8, ring_buffer.free_slots(0, 0));
+        assert_eq!(8, ring_buffer.available_capacity(0, 0));
         // Publisher has just published 3 and consumer is (still) reading 0.
-        assert_eq!(4, ring_buffer.free_slots(3, -1));
+        assert_eq!(4, ring_buffer.available_capacity(3, -1));
         // Publisher has just published 7 and consumer is (still) reading 0.
-        assert_eq!(0, ring_buffer.free_slots(7, -1));
+        assert_eq!(0, ring_buffer.available_capacity(7, -1));
         // Publisher has just published 7 and consumer has read 0.
-        assert_eq!(1, ring_buffer.free_slots(7, 0));
+        assert_eq!(1, ring_buffer.available_capacity(7, 0));
         // Publisher has just released 5 and consumer has read 2.
-        assert_eq!(5, ring_buffer.free_slots(5, 2));
+        assert_eq!(5, ring_buffer.available_capacity(5, 2));
         // Publisher has just released 5 and consumer has read 3.
-        assert_eq!(6, ring_buffer.free_slots(5, 3));
+        assert_eq!(6, ring_buffer.available_capacity(5, 3));
         // Publisher has just released 5 and consumer has read 4.
-        assert_eq!(7, ring_buffer.free_slots(5, 4));
+        assert_eq!(7, ring_buffer.available_capacity(5, 4));
         // Publisher has just released 5 and consumer has read 5.
-        assert_eq!(8, ring_buffer.free_slots(5, 5));
+        assert_eq!(8, ring_buffer.available_capacity(5, 5));
 
         // Round 2:
         // Publisher has just published 11 and consumer has read 9.
-        assert_eq!(6, ring_buffer.free_slots(11, 9));
+        assert_eq!(6, ring_buffer.available_capacity(11, 9));
         // Publisher has just published 12 and consumer has read 12.
-        assert_eq!(8, ring_buffer.free_slots(12, 12));
+        assert_eq!(8, ring_buffer.available_capacity(12, 12));
         // Consumer has read 7 and the publisher has just published 15.
-        assert_eq!(0, ring_buffer.free_slots(15, 7));
+        assert_eq!(0, ring_buffer.available_capacity(15, 7));
     }
 }

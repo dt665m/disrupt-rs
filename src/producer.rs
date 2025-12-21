@@ -56,7 +56,7 @@ impl<'a, E> Iterator for MutBatchIter<'a, E> {
         if self.current > self.last {
             None
         } else {
-            let event_ptr = self.ring_buffer.get(self.current);
+            let event_ptr = unsafe { self.ring_buffer.get(self.current).as_ptr() };
             // Safety: Iterator has exclusive access to event.
             let event = unsafe { &mut *event_ptr };
             self.current += 1;
