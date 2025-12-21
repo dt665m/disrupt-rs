@@ -104,7 +104,11 @@ where
         }
     }
 
-    /// Add an event handler with state.
+    /// Add an event handler with a per-consumer state value.
+    ///
+    /// `initialize_state` is moved into the consumer thread and invoked there, which allows the
+    /// produced `S` to be `!Send` (as long as it stays thread-local). See [`EventHandlerWithState`]
+    /// for more details.
     pub fn handle_events_and_state_with<EH, S, IS>(
         mut self,
         event_handler: EH,
@@ -189,7 +193,11 @@ where
         }
     }
 
-    /// Add an event handler with state.
+    /// Add an event handler with a per-consumer state value.
+    ///
+    /// `initalize_state` is moved into the consumer thread and invoked there, which allows the
+    /// produced `S` to be `!Send` (as long as it stays thread-local). See [`EventHandlerWithState`]
+    /// for more details.
     pub fn handle_events_and_state_with<EH, S, IS>(
         mut self,
         event_handler: EH,
@@ -262,7 +270,11 @@ where
         self
     }
 
-    /// Add an event handler with state.
+    /// Add an event handler with a per-consumer state value.
+    ///
+    /// `initialize_state` is moved into the consumer thread and invoked there, which allows the
+    /// produced `S` to be `!Send` (as long as it stays thread-local). See [`EventHandlerWithState`]
+    /// for more details.
     pub fn handle_events_and_state_with<EH, S, IS>(
         mut self,
         event_handler: EH,

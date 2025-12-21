@@ -176,6 +176,15 @@
 //!
 //! ### Adding Custom State That is Neither `Send` Nor `Sync`
 //!
+//! Consumer threads are started with `std::thread::spawn`, which requires that anything moved into
+//! the spawned thread is `Send`. This means an event handler itself must be `Send`.
+//!
+//! `handle_events_and_state_with` exists for cases where you want *per-consumer* state that stays
+//! on the consumer thread and therefore does **not** need to be `Send` (for example `Rc`,
+//! `RefCell`, or single-threaded arenas). The `initialize_state` closure is `Send` and is invoked
+//! inside the consumer thread after it starts; the produced state can be `!Send` as long as it
+//! never leaves that thread.
+//!
 //! ```
 //! use std::{cell::RefCell, rc::Rc};
 //! use disruptor::*;
