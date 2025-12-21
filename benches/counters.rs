@@ -5,10 +5,14 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use crossbeam::channel::*;
 use disruptor::{build_multi_producer, build_single_producer, BusySpin, Producer};
-use std::hint::black_box;
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::{
+    hint::black_box,
+    sync::{
+        atomic::{AtomicI32, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+};
 
 const BUF_SIZE: usize = 32_768;
 const MAX_PRODUCER_EVENTS: usize = 10_000_000;

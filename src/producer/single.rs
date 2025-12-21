@@ -9,7 +9,10 @@ use crate::{
     Sequence,
 };
 use crossbeam_utils::CachePadded;
-use std::sync::atomic::{fence, Ordering};
+use std::{
+    hint,
+    sync::atomic::{fence, Ordering},
+};
 
 /// Producer for publishing to the Disruptor from a single thread.
 ///
@@ -53,7 +56,9 @@ where
     where
         F: FnOnce(&mut E),
     {
-        while self.next_sequences(1).is_err() { /* Empty. */ }
+        while self.next_sequences(1).is_err() {
+            hint::spin_loop();
+        }
         self.apply_update(update);
     }
 
@@ -78,7 +83,9 @@ where
         E: 'a,
         F: FnOnce(MutBatchIter<'a, E>),
     {
-        while self.next_sequences(n).is_err() { /* Empty. */ }
+        while self.next_sequences(n).is_err() {
+            hint::spin_loop();
+        }
         self.apply_updates(n, update);
     }
 }
@@ -188,6 +195,8 @@ where
     fn drop(&mut self) {
         self.shutdown_at_sequence
             .store(self.sequence, Ordering::Relaxed);
+        // Wake any blocking consumers so they can observe shutdown promptly.
+        self.notifier.wake();
         self.consumers.iter_mut().for_each(|c| c.join());
     }
 }

@@ -1,21 +1,26 @@
-use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion,
+    Throughput,
 };
-use crossbeam::channel::TrySendError::Full;
 use crossbeam::channel::{
     bounded,
     TryRecvError::{Disconnected, Empty},
+    TrySendError::Full,
 };
 use crossbeam_utils::CachePadded;
 use disruptor::{BusySpin, Producer};
-use std::sync::atomic::{
-    AtomicBool, AtomicI64,
-    Ordering::{Acquire, Relaxed, Release},
+use std::{
+    hint::black_box,
+    sync::{
+        atomic::{
+            AtomicBool, AtomicI64,
+            Ordering::{Acquire, Relaxed, Release},
+        },
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
 
 const PRODUCERS: usize = 2;
 const DATA_STRUCTURE_SIZE: usize = 256;

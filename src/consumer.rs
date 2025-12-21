@@ -8,8 +8,9 @@ use crate::{
     barrier::Barrier,
     builder::Shared,
     cursor::Cursor,
+    event_handler::{EventHandler, EventHandlerWithState},
     sequence::DependentSequence,
-    wait_strategies::{WaitOutcome, WaitStrategy, Waiter},
+    wait_strategies::{WaitOutcome, WaitStrategy, Waiter, WakeupNotifier},
     Sequence,
 };
 
@@ -112,10 +113,11 @@ pub(crate) fn start_processor<E, EP, W, B>(
     mut event_handler: EP,
     builder: &mut Shared<E, W>,
     barrier: Arc<B>,
+    notifier: W::Notifier,
 ) -> (Arc<Cursor>, Consumer)
 where
     E: 'static + Send + Sync,
-    EP: 'static + Send + FnMut(&E, Sequence, bool),
+    EP: 'static + EventHandler<E>,
     W: 'static + WaitStrategy,
     B: 'static + Barrier + Send + Sync,
 {
@@ -149,12 +151,14 @@ where
                         // SAFETY: Now, we have (shared) read access to the event at `sequence`.
                         let event_ptr = ring_buffer.get(sequence);
                         let event = unsafe { &*event_ptr };
-                        event_handler(event, sequence, end_of_batch);
+                        event_handler.on_event(event, sequence, end_of_batch);
                         // Update next sequence to read.
                         sequence += 1;
                     }
                     // Signal to producers or later consumers that we're done processing `sequence - 1`.
                     consumer_cursor.store(sequence - 1);
+                    // Wake any blocking waiters that might be gated on this consumer's progress.
+                    notifier.wake();
                 }
             })
             .expect("Should spawn thread.")
@@ -169,11 +173,12 @@ pub(crate) fn start_processor_with_state<E, EP, W, B, S, IS>(
     builder: &mut Shared<E, W>,
     barrier: Arc<B>,
     initialize_state: IS,
+    notifier: W::Notifier,
 ) -> (Arc<Cursor>, Consumer)
 where
     E: 'static + Send + Sync,
     IS: 'static + Send + FnOnce() -> S,
-    EP: 'static + Send + FnMut(&mut S, &E, Sequence, bool),
+    EP: 'static + EventHandlerWithState<E, S>,
     W: 'static + WaitStrategy,
     B: 'static + Barrier + Send + Sync,
 {
@@ -208,12 +213,14 @@ where
                         // SAFETY: Now, we have (shared) read access to the event at `sequence`.
                         let event_ptr = ring_buffer.get(sequence);
                         let event = unsafe { &*event_ptr };
-                        event_handler(&mut state, event, sequence, end_of_batch);
+                        event_handler.on_event(&mut state, event, sequence, end_of_batch);
                         // Update next sequence to read.
                         sequence += 1;
                     }
                     // Signal to producers or later consumers that we're done processing `sequence - 1`.
                     consumer_cursor.store(sequence - 1);
+                    // Wake any blocking waiters that might be gated on this consumer's progress.
+                    notifier.wake();
                 }
             })
             .expect("Should spawn thread.")
@@ -253,7 +260,8 @@ mod tests {
         c2.store(9);
 
         let dep = Arc::new(DependentSequence::with_value(7));
-        let barrier = MultiConsumerDependentsBarrier::new(vec![c1.clone(), c2.clone()], vec![dep.clone()]);
+        let barrier =
+            MultiConsumerDependentsBarrier::new(vec![c1.clone(), c2.clone()], vec![dep.clone()]);
         assert_eq!(7, barrier.get_after(0));
 
         // Move the dependent sequence backwards; barrier should clamp to the new minimum.

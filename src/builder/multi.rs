@@ -11,9 +11,10 @@ use crate::{
         event_poller::EventPoller, MultiConsumerBarrier, MultiConsumerDependentsBarrier,
         SingleConsumerBarrier,
     },
+    event_handler::{EventHandler, EventHandlerWithState},
     producer::multi::{MultiProducer, MultiProducerBarrier},
     wait_strategies::WaitStrategy,
-    DependentSequence, Sequence,
+    DependentSequence,
 };
 
 use super::{Builder, Shared, MC, NC, SC};
@@ -92,7 +93,7 @@ where
     /// Add an event handler.
     pub fn handle_events_with<EH>(mut self, event_handler: EH) -> MPBuilder<SC, E, W, B>
     where
-        EH: 'static + Send + FnMut(&E, Sequence, bool),
+        EH: 'static + EventHandler<E>,
     {
         self.add_event_handler(event_handler);
         MPBuilder {
@@ -110,7 +111,7 @@ where
         initialize_state: IS,
     ) -> MPBuilder<SC, E, W, B>
     where
-        EH: 'static + Send + FnMut(&mut S, &E, Sequence, bool),
+        EH: 'static + EventHandlerWithState<E, S>,
         IS: 'static + Send + FnOnce() -> S,
     {
         self.add_event_handler_with_state(event_handler, initialize_state);
@@ -147,7 +148,7 @@ where
     /// Add an event handler.
     pub fn handle_events_with<EH>(mut self, event_handler: EH) -> MPBuilder<MC, E, W, B>
     where
-        EH: 'static + Send + FnMut(&E, Sequence, bool),
+        EH: 'static + EventHandler<E>,
     {
         self.add_event_handler(event_handler);
         MPBuilder {
@@ -165,7 +166,7 @@ where
         initialize_state: IS,
     ) -> MPBuilder<MC, E, W, B>
     where
-        EH: 'static + Send + FnMut(&mut S, &E, Sequence, bool),
+        EH: 'static + EventHandlerWithState<E, S>,
         IS: 'static + Send + FnOnce() -> S,
     {
         self.add_event_handler_with_state(event_handler, initialize_state);
@@ -255,7 +256,7 @@ where
     /// Add an event handler.
     pub fn handle_events_with<EH>(mut self, event_handler: EH) -> MPBuilder<MC, E, W, B>
     where
-        EH: 'static + Send + FnMut(&E, Sequence, bool),
+        EH: 'static + EventHandler<E>,
     {
         self.add_event_handler(event_handler);
         self
@@ -268,7 +269,7 @@ where
         initialize_state: IS,
     ) -> MPBuilder<MC, E, W, B>
     where
-        EH: 'static + Send + FnMut(&mut S, &E, Sequence, bool),
+        EH: 'static + EventHandlerWithState<E, S>,
         IS: 'static + Send + FnOnce() -> S,
     {
         self.add_event_handler_with_state(event_handler, initialize_state);

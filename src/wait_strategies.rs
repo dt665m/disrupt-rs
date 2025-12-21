@@ -6,12 +6,14 @@
 
 use std::{
     hint,
-    sync::atomic::{fence, AtomicI64, Ordering},
+    sync::atomic::{fence, AtomicBool, AtomicI64, Ordering},
+    sync::Arc,
     thread,
 };
 
 use crate::{barrier::Barrier, Sequence};
 use crossbeam_utils::CachePadded;
+use parking_lot::{Condvar, Mutex};
 
 /// Error/alert conditions a waiter can encounter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,199 @@ pub trait Waiter: Send {
         barrier: &impl Barrier,
         shutdown: &CachePadded<AtomicI64>,
     ) -> WaitOutcome;
+}
+
+/// Blocking wait strategy using a single `Condvar` shared among all waiters.
+///
+/// This is similar to the Java Disruptor's `BlockingWaitStrategy`: waiters block on a condition
+/// variable and are woken by producers and (in this crate) by consumers when they advance.
+///
+/// Note: on its own, a `Condvar` does not provide a predicate; we use an epoch counter protected
+/// by the same mutex to avoid missed wakeups.
+#[derive(Clone, Default)]
+pub struct BlockingWaitStrategy {
+    inner: Arc<BlockingInner>,
+}
+
+#[derive(Default)]
+struct BlockingInner {
+    mutex: Mutex<u64>,
+    condvar: Condvar,
+}
+
+/// Per-consumer waiter for [`BlockingWaitStrategy`].
+pub struct BlockingWaiter {
+    inner: Arc<BlockingInner>,
+}
+
+#[derive(Clone)]
+/// Producer/consumer wake handle for [`BlockingWaitStrategy`].
+pub struct BlockingNotifier {
+    inner: Arc<BlockingInner>,
+}
+
+impl WakeupNotifier for BlockingNotifier {
+    fn wake(&self) {
+        let mut epoch = self.inner.mutex.lock();
+        *epoch = epoch.wrapping_add(1);
+        self.inner.condvar.notify_all();
+    }
+}
+
+impl WaitStrategy for BlockingWaitStrategy {
+    type Waiter = BlockingWaiter;
+    type Notifier = BlockingNotifier;
+
+    fn new_waiter(&self) -> Self::Waiter {
+        BlockingWaiter {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn notifier(&self) -> Self::Notifier {
+        BlockingNotifier {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Waiter for BlockingWaiter {
+    fn wait_for(
+        &mut self,
+        requested: Sequence,
+        barrier: &impl Barrier,
+        shutdown: &CachePadded<AtomicI64>,
+    ) -> WaitOutcome {
+        loop {
+            if shutdown.load(Ordering::Relaxed) == requested {
+                return WaitOutcome::Shutdown;
+            }
+
+            let available = barrier.get_after(requested);
+            if available >= requested {
+                fence(Ordering::Acquire);
+                return WaitOutcome::Available { upper: available };
+            }
+
+            let mut epoch_guard = self.inner.mutex.lock();
+            let epoch = *epoch_guard;
+            while *epoch_guard == epoch {
+                if shutdown.load(Ordering::Relaxed) == requested {
+                    return WaitOutcome::Shutdown;
+                }
+
+                let available = barrier.get_after(requested);
+                if available >= requested {
+                    fence(Ordering::Acquire);
+                    return WaitOutcome::Available { upper: available };
+                }
+
+                self.inner.condvar.wait(&mut epoch_guard);
+            }
+        }
+    }
+}
+
+/// "Lite" blocking wait strategy.
+///
+/// Compared to [`BlockingWaitStrategy`], this tracks the number of currently parked waiters and
+/// avoids taking the mutex in `wake()` when there are no waiters.
+#[derive(Clone, Default)]
+pub struct LiteBlockingWaitStrategy {
+    inner: Arc<LiteBlockingInner>,
+}
+
+#[derive(Default)]
+struct LiteBlockingInner {
+    mutex: Mutex<u64>,
+    condvar: Condvar,
+    signal_needed: AtomicBool,
+    waiters: std::sync::atomic::AtomicUsize,
+}
+
+/// Per-consumer waiter for [`LiteBlockingWaitStrategy`].
+pub struct LiteBlockingWaiter {
+    inner: Arc<LiteBlockingInner>,
+}
+
+#[derive(Clone)]
+/// Producer/consumer wake handle for [`LiteBlockingWaitStrategy`].
+pub struct LiteBlockingNotifier {
+    inner: Arc<LiteBlockingInner>,
+}
+
+impl WakeupNotifier for LiteBlockingNotifier {
+    fn wake(&self) {
+        // Fast-path: no waiter has indicated it may block since the last signal.
+        //
+        // This is intentionally *not* keyed off `waiters == 0` as that can miss a signal when a
+        // waiter is about to park (the classic "check-then-sleep" race).
+        if !self.inner.signal_needed.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let mut epoch = self.inner.mutex.lock();
+        *epoch = epoch.wrapping_add(1);
+        self.inner.condvar.notify_all();
+    }
+}
+
+impl WaitStrategy for LiteBlockingWaitStrategy {
+    type Waiter = LiteBlockingWaiter;
+    type Notifier = LiteBlockingNotifier;
+
+    fn new_waiter(&self) -> Self::Waiter {
+        LiteBlockingWaiter {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    fn notifier(&self) -> Self::Notifier {
+        LiteBlockingNotifier {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Waiter for LiteBlockingWaiter {
+    fn wait_for(
+        &mut self,
+        requested: Sequence,
+        barrier: &impl Barrier,
+        shutdown: &CachePadded<AtomicI64>,
+    ) -> WaitOutcome {
+        loop {
+            if shutdown.load(Ordering::Relaxed) == requested {
+                return WaitOutcome::Shutdown;
+            }
+
+            let available = barrier.get_after(requested);
+            if available >= requested {
+                fence(Ordering::Acquire);
+                return WaitOutcome::Available { upper: available };
+            }
+
+            let mut epoch_guard = self.inner.mutex.lock();
+            let epoch = *epoch_guard;
+            while *epoch_guard == epoch {
+                // Indicate to producers/advancing consumers that a signal might be needed.
+                self.inner.signal_needed.store(true, Ordering::Release);
+
+                if shutdown.load(Ordering::Relaxed) == requested {
+                    return WaitOutcome::Shutdown;
+                }
+
+                let available = barrier.get_after(requested);
+                if available >= requested {
+                    fence(Ordering::Acquire);
+                    return WaitOutcome::Available { upper: available };
+                }
+
+                self.inner.waiters.fetch_add(1, Ordering::Relaxed);
+                self.inner.condvar.wait(&mut epoch_guard);
+                self.inner.waiters.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 /// Busy spin wait strategy. Lowest possible latency.
@@ -233,16 +428,19 @@ impl Waiter for YieldingWaiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicI64;
+    use std::{
+        sync::{atomic::AtomicI64, mpsc, Arc},
+        time::Duration,
+    };
 
     struct TestBarrier {
-        available: std::sync::Arc<AtomicI64>,
+        available: Arc<AtomicI64>,
     }
 
     impl TestBarrier {
         fn new(v: i64) -> Self {
             Self {
-                available: std::sync::Arc::new(AtomicI64::new(v)),
+                available: Arc::new(AtomicI64::new(v)),
             }
         }
     }
@@ -299,8 +497,8 @@ mod tests {
     #[test]
     fn busy_spin_waiter_observes_release_with_acquire_fence() {
         let mut waiter = BusySpinWaiter;
-        let shutdown = std::sync::Arc::new(CachePadded::new(AtomicI64::new(-1)));
-        let data = std::sync::Arc::new(AtomicI64::new(0));
+        let shutdown = Arc::new(CachePadded::new(AtomicI64::new(-1)));
+        let data = Arc::new(AtomicI64::new(0));
         let barrier = TestBarrier::new(0);
         let barrier_for_thread = barrier.available.clone();
         let data_for_thread = data.clone();
@@ -322,7 +520,7 @@ mod tests {
     fn busy_spin_waiter_exits_on_shutdown_race() {
         let mut waiter = BusySpinWaiter;
         let barrier = TestBarrier::new(-1);
-        let shutdown = std::sync::Arc::new(CachePadded::new(AtomicI64::new(-1)));
+        let shutdown = Arc::new(CachePadded::new(AtomicI64::new(-1)));
 
         // Flip shutdown while waiter would otherwise spin.
         let shutdown_ref = shutdown.clone();
@@ -334,5 +532,68 @@ mod tests {
         let res = waiter.wait_for(5, &barrier, shutdown.as_ref());
         assert!(matches!(res, WaitOutcome::Shutdown));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn blocking_wait_strategy_wakes_waiters() {
+        let barrier = TestBarrier::new(0);
+        let shutdown = CachePadded::new(AtomicI64::new(-1));
+        let strategy = BlockingWaitStrategy::default();
+        let notifier = strategy.notifier();
+
+        let (tx, rx) = mpsc::channel();
+        let barrier_available = barrier.available.clone();
+        std::thread::spawn(move || {
+            let mut waiter = strategy.new_waiter();
+            let res = waiter.wait_for(1, &barrier, &shutdown);
+            tx.send(res).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(10));
+        barrier_available.store(1, Ordering::Relaxed);
+        notifier.wake();
+
+        let outcome = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(outcome, WaitOutcome::Available { upper: 1 }));
+    }
+
+    #[test]
+    fn lite_blocking_wait_strategy_skips_wake_when_no_waiters() {
+        let strategy = LiteBlockingWaitStrategy::default();
+        let notifier = strategy.notifier();
+        assert_eq!(strategy.inner.waiters.load(Ordering::Relaxed), 0);
+        assert!(!strategy.inner.signal_needed.load(Ordering::Relaxed));
+
+        // Should be a cheap no-op: nobody is waiting.
+        notifier.wake();
+        assert_eq!(strategy.inner.waiters.load(Ordering::Relaxed), 0);
+        assert!(!strategy.inner.signal_needed.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn lite_blocking_wait_strategy_wakes_waiters() {
+        let barrier = TestBarrier::new(0);
+        let shutdown = CachePadded::new(AtomicI64::new(-1));
+        let strategy = LiteBlockingWaitStrategy::default();
+        let notifier = strategy.notifier();
+
+        let (tx, rx) = mpsc::channel();
+        let barrier_available = barrier.available.clone();
+        let strategy_for_thread = strategy.clone();
+        std::thread::spawn(move || {
+            let mut waiter = strategy_for_thread.new_waiter();
+            let res = waiter.wait_for(1, &barrier, &shutdown);
+            tx.send(res).unwrap();
+        });
+
+        // Give the waiter a chance to park.
+        std::thread::sleep(Duration::from_millis(10));
+
+        barrier_available.store(1, Ordering::Relaxed);
+        notifier.wake();
+
+        let outcome = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(outcome, WaitOutcome::Available { upper: 1 }));
+        assert_eq!(strategy.inner.waiters.load(Ordering::Relaxed), 0);
     }
 }

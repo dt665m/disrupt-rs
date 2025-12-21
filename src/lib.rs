@@ -267,6 +267,7 @@ mod barrier;
 pub mod builder;
 mod consumer;
 mod cursor;
+mod event_handler;
 mod producer;
 mod ringbuffer;
 mod sequence;
@@ -277,26 +278,38 @@ pub use crate::consumer::event_poller::{EventGuard, EventPoller, Polling};
 pub use crate::consumer::{
     MultiConsumerBarrier, MultiConsumerDependentsBarrier, SingleConsumerBarrier,
 };
+pub use crate::event_handler::EventHandler;
+pub use crate::event_handler::EventHandlerWithState;
 pub use crate::producer::{
     multi::{MultiProducer, MultiProducerBarrier},
     single::{SingleProducer, SingleProducerBarrier},
 };
 pub use crate::producer::{MissingFreeSlots, Producer, RingBufferFull};
 pub use crate::sequence::DependentSequence;
-pub use crate::wait_strategies::{BusySpin, BusySpinWithSpinLoopHint, YieldingWaitStrategy};
+pub use crate::wait_strategies::{
+    BlockingWaitStrategy, BusySpin, BusySpinWithSpinLoopHint, LiteBlockingWaitStrategy,
+    YieldingWaitStrategy,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use producer::MissingFreeSlots;
-    use std::cell::RefCell;
-    use std::collections::HashSet;
-    use std::rc::Rc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::{mpsc, Arc};
-    use std::thread;
-    use std::time::Duration;
+    use std::{
+        cell::RefCell,
+        collections::HashSet,
+        rc::Rc,
+        sync::{
+            atomic::{
+                AtomicBool,
+                Ordering::{Acquire, Relaxed, Release},
+            },
+            mpsc, Arc, Mutex,
+        },
+        thread,
+        time::Duration,
+    };
+    use wait_strategies::{WaitStrategy, WakeupNotifier};
 
     #[derive(Debug)]
     struct Event {
@@ -1058,6 +1071,130 @@ mod tests {
         assert_eq!(ep3.poll().err(), Some(Polling::Shutdown));
     }
 
+    #[cfg_attr(miri, ignore)] // blocking waits / timing make this flaky under Miri.
+    #[test]
+    fn blocking_wait_strategy_mixes_callback_and_polling_in_order() {
+        let wait_strategy = BlockingWaitStrategy::default();
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+
+        let callback_log = Arc::clone(&log);
+        let callback = move |e: &Event, _, _| {
+            callback_log.lock().unwrap().push(format!("cb{}", e.num));
+        };
+
+        // Stage 1: callback consumer. Stage 2: poller, gated on stage 1 via `and_then()`.
+        let builder = build_single_producer(8, factory(), wait_strategy.clone())
+            .handle_events_with(callback)
+            .and_then();
+        let (mut poller, builder) = builder.event_poller();
+        let mut producer = builder.build();
+
+        // Poller thread uses the *same* wait strategy instance (shares inner Arc).
+        let poller_log = Arc::clone(&log);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+        let wait_strategy_for_thread = wait_strategy.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let mut waiter = wait_strategy_for_thread.new_waiter();
+            loop {
+                if stop_for_thread.load(Relaxed) {
+                    break;
+                }
+                match poller.poll_wait(&mut waiter) {
+                    Ok(mut events) => {
+                        for e in &mut events {
+                            poller_log.lock().unwrap().push(format!("poll{}", e.num));
+                        }
+                    }
+                    Err(Polling::NoEvents) => continue,
+                    Err(Polling::Shutdown) => break,
+                }
+            }
+            let _ = done_tx.send(());
+        });
+
+        // Publish two events.
+        producer.publish(|e| e.num = 1);
+        producer.publish(|e| e.num = 2);
+        drop(producer); // triggers shutdown; callback drains; poller should drain after callback.
+
+        // Avoid hanging the test suite: if something goes wrong, force-stop the poller thread.
+        if done_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+            stop.store(true, Relaxed);
+            wait_strategy.notifier().wake(); // nudge any blocked waiter
+            join.join().unwrap();
+            panic!("poller thread did not finish in time");
+        }
+        join.join().unwrap();
+
+        // Verify both consumers saw both events, and that stage 1 precedes stage 2 per event.
+        let final_log = log.lock().unwrap().clone();
+        let cb1 = final_log.iter().position(|s| s == "cb1").unwrap();
+        let cb2 = final_log.iter().position(|s| s == "cb2").unwrap();
+        let p1 = final_log.iter().position(|s| s == "poll1").unwrap();
+        let p2 = final_log.iter().position(|s| s == "poll2").unwrap();
+
+        assert!(
+            cb1 < p1,
+            "event 1 must be processed by callback before poller"
+        );
+        assert!(
+            cb2 < p2,
+            "event 2 must be processed by callback before poller"
+        );
+        assert_eq!(final_log.iter().filter(|s| s.as_str() == "cb1").count(), 1);
+        assert_eq!(final_log.iter().filter(|s| s.as_str() == "cb2").count(), 1);
+        assert_eq!(
+            final_log.iter().filter(|s| s.as_str() == "poll1").count(),
+            1
+        );
+        assert_eq!(
+            final_log.iter().filter(|s| s.as_str() == "poll2").count(),
+            1
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // timing-based deadlock regression test
+    #[test]
+    fn blocking_wait_strategy_shutdown_wakes_idle_consumer() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let factory = || Event { num: 0 };
+            let processor = |_e: &Event, _seq: Sequence, _eob: bool| {
+                // no-op
+            };
+            let producer = build_single_producer(8, factory, BlockingWaitStrategy::default())
+                .handle_events_with(processor)
+                .build();
+            drop(producer);
+            tx.send(()).unwrap();
+        });
+
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("dropping producer should not deadlock");
+    }
+
+    #[cfg_attr(miri, ignore)] // timing-based deadlock regression test
+    #[test]
+    fn lite_blocking_wait_strategy_shutdown_wakes_idle_consumer() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let factory = || Event { num: 0 };
+            let processor = |_e: &Event, _seq: Sequence, _eob: bool| {
+                // no-op
+            };
+            let producer = build_single_producer(8, factory, LiteBlockingWaitStrategy::default())
+                .handle_events_with(processor)
+                .build();
+            drop(producer);
+            tx.send(()).unwrap();
+        });
+
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("dropping producer should not deadlock");
+    }
+
     #[test]
     fn spmc_with_mixed_event_pollers_and_processors() {
         let (s, r) = mpsc::channel();
@@ -1255,8 +1392,6 @@ mod tests {
 
     #[test]
     fn gating_backpressure_prevents_overwrite() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         let start_engine = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
 
@@ -1264,7 +1399,7 @@ mod tests {
             let start_engine = Arc::clone(&start_engine);
             let tx = tx.clone();
             move |_e: &Event, seq: Sequence, _| {
-                while !start_engine.load(Ordering::Acquire) {
+                while !start_engine.load(Acquire) {
                     std::thread::yield_now();
                 }
                 tx.send(seq).expect("send engine seq");
@@ -1291,7 +1426,7 @@ mod tests {
         );
 
         // Let the engine run and consume.
-        start_engine.store(true, Ordering::Release);
+        start_engine.store(true, Release);
         rx.recv_timeout(Duration::from_millis(200))
             .expect("engine should consume once unblocked");
 

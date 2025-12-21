@@ -2,16 +2,15 @@
 //!
 //! Use [build_single_producer] or [build_multi_producer] to get started.
 
-use crate::consumer::Consumer;
-use crate::cursor::Cursor;
-use crate::producer::{multi::MultiProducerBarrier, single::SingleProducerBarrier};
-use crate::ringbuffer::RingBuffer;
-use crate::wait_strategies::WaitStrategy;
 use crate::{
     affinity::cpu_has_core_else_panic,
     barrier::{Barrier, NONE},
-    consumer::{event_poller::EventPoller, start_processor, start_processor_with_state},
-    Sequence,
+    consumer::{event_poller::EventPoller, start_processor, start_processor_with_state, Consumer},
+    cursor::Cursor,
+    event_handler::{EventHandler, EventHandlerWithState},
+    producer::{multi::MultiProducerBarrier, single::SingleProducerBarrier},
+    ringbuffer::RingBuffer,
+    wait_strategies::WaitStrategy,
 };
 use core_affinity::CoreId;
 use crossbeam_utils::CachePadded;
@@ -184,10 +183,11 @@ where
 {
     fn add_event_handler<EH>(&mut self, event_handler: EH)
     where
-        EH: 'static + Send + FnMut(&E, Sequence, bool),
+        EH: 'static + EventHandler<E>,
     {
         let barrier = self.dependent_barrier();
-        let (cursor, consumer) = start_processor(event_handler, self.shared(), barrier);
+        let notifier = self.shared().notifier.clone();
+        let (cursor, consumer) = start_processor(event_handler, self.shared(), barrier, notifier);
         self.shared().add_consumer_and_cursor(consumer, cursor);
     }
 
@@ -205,12 +205,18 @@ where
 
     fn add_event_handler_with_state<EH, S, IS>(&mut self, event_handler: EH, initialize_state: IS)
     where
-        EH: 'static + Send + FnMut(&mut S, &E, Sequence, bool),
+        EH: 'static + EventHandlerWithState<E, S>,
         IS: 'static + Send + FnOnce() -> S,
     {
         let barrier = self.dependent_barrier();
-        let (cursor, consumer) =
-            start_processor_with_state(event_handler, self.shared(), barrier, initialize_state);
+        let notifier = self.shared().notifier.clone();
+        let (cursor, consumer) = start_processor_with_state(
+            event_handler,
+            self.shared(),
+            barrier,
+            initialize_state,
+            notifier,
+        );
         self.shared().add_consumer_and_cursor(consumer, cursor);
     }
 

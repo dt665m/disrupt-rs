@@ -10,7 +10,7 @@ use crate::{
 };
 use crossbeam_utils::CachePadded;
 use std::{
-    process,
+    hint, process,
     sync::{
         atomic::{fence, AtomicI64, AtomicU64, Ordering},
         Arc, Mutex,
@@ -66,7 +66,9 @@ where
     where
         F: FnOnce(&mut E),
     {
-        while self.next_sequences(1).is_err() { /* Empty. */ }
+        while self.next_sequences(1).is_err() {
+            hint::spin_loop();
+        }
         self.apply_update(update);
     }
 
@@ -91,7 +93,9 @@ where
         E: 'a,
         F: FnOnce(MutBatchIter<'a, E>),
     {
-        while self.next_sequences(n).is_err() { /* Empty. */ }
+        while self.next_sequences(n).is_err() {
+            hint::spin_loop();
+        }
         self.apply_updates(n, update);
     }
 }
@@ -144,6 +148,8 @@ where
             // All consumers are waiting to read the next sequence.
             let sequence = self.producer_barrier.current() + 1;
             self.shutdown_at_sequence.store(sequence, Ordering::Relaxed);
+            // Wake any blocking consumers so they can observe shutdown promptly.
+            self.notifier.wake();
             shared.consumers.iter_mut().for_each(|c| c.join());
         }
     }
@@ -282,6 +288,7 @@ impl MultiProducerBarrier {
             size >= 64,
             "Multi Producer Disruptor must have a size of minimum 64 slots."
         );
+        assert!(size.is_power_of_two(), "Size must be power of 2.");
 
         let cursor = Cursor::new(NONE);
         let i64_needed = size / 64;
@@ -345,31 +352,27 @@ impl MultiProducerBarrier {
 
     #[inline]
     fn publish_range_relaxed(&self, from: Sequence, n: i64) {
-        let (mut availability_index, mut bit_index) = self.calculate_availability_indices(from);
-        let mut flip_mask = 0_u64;
-        let mut availability = self.availability_at(availability_index);
-
-        for i in 0..n {
-            // Encode which bits need to be flipped in the next bit field, counting bit_index upwards while < 63.
-            flip_mask |= 1 << bit_index;
-
-            if bit_index < 63 {
-                // We shift max 63 places.
-                bit_index += 1;
-            } else {
-                // Commit flip mask so far to current bit field.
-                availability.fetch_xor(flip_mask, Ordering::Relaxed);
-                // Load next bit field and reset flip_mask.
-                let next_sequence = from + i + 1;
-                (availability_index, _) = self.calculate_availability_indices(next_sequence);
-                availability = self.availability_at(availability_index);
-                bit_index = 0;
-                flip_mask = 0;
-            }
+        if n <= 0 {
+            return;
         }
-        // If there's any remaining - commit them to the last bit field.
-        if flip_mask > 0 {
-            availability.fetch_xor(flip_mask, Ordering::Relaxed);
+
+        let mut sequence = from;
+        let mut remaining = n as usize;
+        while remaining != 0 {
+            let (availability_index, bit_index) = self.calculate_availability_indices(sequence);
+            let take = remaining.min(64 - bit_index);
+
+            let mask = if take == 64 {
+                !0_u64
+            } else {
+                ((1_u64 << take) - 1) << bit_index
+            };
+
+            self.availability_at(availability_index)
+                .fetch_xor(mask, Ordering::Relaxed);
+
+            sequence += take as i64;
+            remaining -= take;
         }
     }
 
@@ -389,37 +392,40 @@ impl Barrier for MultiProducerBarrier {
     fn get_after(&self, prev: Sequence) -> Sequence {
         let mut availability_flag = self.calculate_availability_flag(prev);
         let (mut availability_index, mut bit_index) = self.calculate_availability_indices(prev);
-        let mut availability = self
-            .availability_at(availability_index)
-            .load(Ordering::Relaxed);
-        // Shift bits to first relevant bit.
-        availability >>= bit_index;
-        let mut highest_available = prev;
+        let mut sequence = prev;
 
         loop {
-            if availability & 1 != availability_flag {
-                return highest_available - 1;
-            }
-            highest_available += 1;
-
-            // Prepare for checking the next bit.
-            if bit_index < 63 {
-                // We shift max 63 places.
-                bit_index += 1;
-                availability >>= 1;
+            let word = self
+                .availability_at(availability_index)
+                .load(Ordering::Relaxed);
+            let bits_remaining = 64 - bit_index;
+            let relevant_mask = if bits_remaining == 64 {
+                !0_u64
             } else {
-                // Load next bit field.
-                (availability_index, _) = self.calculate_availability_indices(highest_available);
-                availability = self
-                    .availability_at(availability_index)
-                    .load(Ordering::Relaxed);
-                bit_index = 0;
+                (1_u64 << bits_remaining) - 1
+            };
 
-                if availability_index == 0 {
-                    // If we wrapped then we're now looking for the flipped bit.
-                    // (I.e. from odd to even or from even to odd.)
-                    availability_flag ^= 1;
-                }
+            // Shift so bit 0 corresponds to `sequence`, then mask off the unused upper bits.
+            let shifted = (word >> bit_index) & relevant_mask;
+            let mismatch = if availability_flag == 0 {
+                shifted
+            } else {
+                (!shifted) & relevant_mask
+            };
+
+            if mismatch != 0 {
+                let matches = mismatch.trailing_zeros() as i64;
+                return sequence + matches - 1;
+            }
+
+            // Entire remaining part of this word is contiguous and available.
+            sequence += bits_remaining as i64;
+            availability_index += 1;
+            bit_index = 0;
+
+            if availability_index == self.available.len() {
+                availability_index = 0;
+                availability_flag ^= 1;
             }
         }
     }

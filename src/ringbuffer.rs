@@ -1,4 +1,4 @@
-use std::cell::UnsafeCell;
+use std::{cell::UnsafeCell, ptr::NonNull};
 
 use crate::Sequence;
 
@@ -46,10 +46,19 @@ impl<E> RingBuffer<E> {
     /// exist at any point in time.
     #[inline]
     pub(crate) fn get(&self, sequence: Sequence) -> *mut E {
+        self.ptr(sequence).as_ptr()
+    }
+
+    /// Returns a non-null pointer to the slot for `sequence`.
+    ///
+    /// Callers must uphold the same aliasing guarantees as [`Self::get`].
+    #[inline(always)]
+    pub(crate) fn ptr(&self, sequence: Sequence) -> NonNull<E> {
         let index = (sequence & self.index_mask) as usize;
         // SAFETY: Index is within bounds - guaranteed by invariant and index mask.
         let slot = unsafe { self.slots.get_unchecked(index) };
-        slot.get()
+        // SAFETY: `UnsafeCell::get()` returns a non-null pointer to the slot storage.
+        unsafe { NonNull::new_unchecked(slot.get()) }
     }
 
     #[inline]

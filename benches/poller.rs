@@ -1,12 +1,17 @@
-use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion,
+    Throughput,
 };
 use disruptor::{BusySpin, Producer};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
-use std::thread::{self, spawn};
-use std::time::{Duration, Instant};
+use std::{
+    hint::black_box,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
+    thread::{self, spawn},
+    time::{Duration, Instant},
+};
 
 const DATA_STRUCTURE_SIZE: usize = 128;
 const BURST_SIZES: [u64; 3] = [1, 10, 100];

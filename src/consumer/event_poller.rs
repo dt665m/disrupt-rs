@@ -1,4 +1,10 @@
-use crate::{barrier::Barrier, cursor::Cursor, ringbuffer::RingBuffer, Sequence};
+use crate::{
+    barrier::Barrier,
+    cursor::Cursor,
+    ringbuffer::RingBuffer,
+    wait_strategies::{WaitOutcome, Waiter},
+    Sequence,
+};
 use crossbeam_utils::CachePadded;
 use std::sync::{
     atomic::{fence, AtomicI64, Ordering},
@@ -144,6 +150,34 @@ where
             available,
         })
     }
+
+    /// Wait for events using the provided [`Waiter`] and then return an [`EventGuard`].
+    ///
+    /// This is useful when you want to drive an [`EventPoller`] from your own thread while still
+    /// reusing the library's wait strategies (e.g. [`BusySpin`](crate::BusySpin),
+    /// [`YieldingWaitStrategy`](crate::YieldingWaitStrategy)).
+    ///
+    /// If the waiter returns [`WaitOutcome::Timeout`], this returns [`Polling::NoEvents`] so the
+    /// caller can do other work.
+    pub fn poll_wait(&mut self, waiter: &mut impl Waiter) -> Result<EventGuard<'_, E, B>, Polling> {
+        let sequence = self.cursor.relaxed_value() + 1;
+
+        let available = match waiter.wait_for(
+            sequence,
+            self.dependent_barrier.as_ref(),
+            self.shutdown_at_sequence.as_ref(),
+        ) {
+            WaitOutcome::Available { upper } => upper,
+            WaitOutcome::Shutdown => return Err(Polling::Shutdown),
+            WaitOutcome::Timeout => return Err(Polling::NoEvents),
+        };
+
+        Ok(EventGuard {
+            parent: self,
+            sequence,
+            available,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -151,6 +185,8 @@ mod tests {
     use super::*;
     use crate::consumer::SingleConsumerBarrier;
     use crate::ringbuffer::RingBuffer;
+    use crate::wait_strategies::WaitStrategy;
+    use crate::Producer;
 
     #[test]
     fn poller_observes_manual_shutdown_without_producer_drop() {
@@ -208,5 +244,30 @@ mod tests {
         }
         handle.join().unwrap();
         assert!(saw_shutdown, "poller should see shutdown promptly");
+    }
+
+    #[test]
+    fn poll_wait_can_drive_poller_with_library_waiter() {
+        #[derive(Debug)]
+        struct Event(i64);
+
+        let factory = || Event(0);
+        let builder = crate::build_single_producer(8, factory, crate::BusySpin);
+        let (mut poller, builder) = builder.event_poller();
+        let mut producer = builder.build();
+
+        producer.publish(|e| e.0 = 42);
+        drop(producer);
+
+        let mut waiter = crate::BusySpin.new_waiter();
+
+        let mut guard = poller
+            .poll_wait(&mut waiter)
+            .expect("should see published event");
+        let got = (&mut guard).next().unwrap().0;
+        assert_eq!(got, 42);
+        drop(guard);
+
+        assert_eq!(poller.poll_wait(&mut waiter).err(), Some(Polling::Shutdown));
     }
 }

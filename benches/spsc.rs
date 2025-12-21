@@ -1,17 +1,22 @@
-use criterion::measurement::WallTime;
 use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+    criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion,
+    Throughput,
 };
-use crossbeam::channel::TrySendError::Full;
 use crossbeam::channel::{
     bounded,
     TryRecvError::{Disconnected, Empty},
+    TrySendError::Full,
 };
-use disruptor::{BusySpin, Producer};
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use disruptor::{BusySpin, LiteBlockingWaitStrategy, Producer};
+use std::{
+    hint::black_box,
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 const DATA_STRUCTURE_SIZE: usize = 128;
 const BURST_SIZES: [u64; 3] = [1, 10, 100];
@@ -41,6 +46,10 @@ pub fn spsc_benchmark(c: &mut Criterion) {
 
             crossbeam(&mut group, inputs, &param);
             disruptor(&mut group, inputs, &param);
+            // Add a single comparable case for LiteBlocking without multiplying the whole matrix.
+            if burst_size == 100 && pause_ms == 1 {
+                disruptor_liteblocking(&mut group, inputs, &param);
+            }
         }
     }
     group.finish();
@@ -121,6 +130,43 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
         .handle_events_with(processor)
         .build();
     let benchmark_id = BenchmarkId::new("disruptor", &param);
+    group.bench_with_input(benchmark_id, &inputs, move |b, (size, pause_ms)| {
+        b.iter_custom(|iters| {
+            pause(*pause_ms);
+            let start = Instant::now();
+            for _ in 0..iters {
+                producer.batch_publish(*size as usize, |iter| {
+                    for (i, e) in iter.enumerate() {
+                        e.data = black_box(i as i64 + 1);
+                    }
+                });
+                // Wait for the last data element to be received inside processor.
+                let last_data = black_box(*size);
+                while sink.load(Ordering::Acquire) != last_data {}
+            }
+            start.elapsed()
+        })
+    });
+}
+
+fn disruptor_liteblocking(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
+    let factory = || Event { data: 0 };
+    // Use an AtomicI64 to "extract" the value from the processing thread.
+    let sink = Arc::new(AtomicI64::new(0));
+    let processor = {
+        let sink = Arc::clone(&sink);
+        move |event: &Event, _sequence: i64, _end_of_batch: bool| {
+            sink.store(event.data, Ordering::Release);
+        }
+    };
+    let mut producer = disruptor::build_single_producer(
+        DATA_STRUCTURE_SIZE,
+        factory,
+        LiteBlockingWaitStrategy::default(),
+    )
+    .handle_events_with(processor)
+    .build();
+    let benchmark_id = BenchmarkId::new("disruptor_liteblocking", &param);
     group.bench_with_input(benchmark_id, &inputs, move |b, (size, pause_ms)| {
         b.iter_custom(|iters| {
             pause(*pause_ms);
