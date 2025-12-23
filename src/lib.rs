@@ -253,8 +253,9 @@
 //!             // Batch process events if efficient in your use case.
 //!             let batch_size = (&mut events).len();
 //!             // Read events with an iterator.
-//!             for event in &mut events {
+//!             for (sequence, event) in &mut events {
 //!                 println!("Processing event: {:?}", event);
+//!                 let _ = sequence;
 //!             }
 //!             // At this point the EventGuard (here named `events`) is dropped,
 //!             // signaling the Disruptor that the events have been processed.
@@ -1004,20 +1005,20 @@ mod tests {
             let mut guard_1 = ep1.poll().ok().unwrap();
             assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(expected, guard_1.map(|e| e.num).collect::<Vec<_>>());
+            assert_eq!(expected, guard_1.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         {
             // Now second poller sees events.
             let mut guard_2 = ep2.poll().ok().unwrap();
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(expected, guard_2.map(|e| e.num).collect::<Vec<_>>());
+            assert_eq!(expected, guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         {
             // Now third poller sees events.
             let mut guard_3 = ep3.poll().ok().unwrap();
-            assert_eq!(expected, guard_3.map(|e| e.num).collect::<Vec<_>>());
+            assert_eq!(expected, guard_3.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         // Dropping the producer should indicate shutdown to all pollers.
@@ -1056,20 +1057,29 @@ mod tests {
             let mut guard_1 = ep1.poll().ok().unwrap();
             assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(expected, guard_1.map(|e| e.num).collect::<HashSet<_>>());
+            assert_eq!(
+                expected,
+                guard_1.map(|(_seq, e)| e.num).collect::<HashSet<_>>()
+            );
         }
 
         {
             // Now second poller sees events.
             let mut guard_2 = ep2.poll().ok().unwrap();
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(expected, guard_2.map(|e| e.num).collect::<HashSet<_>>());
+            assert_eq!(
+                expected,
+                guard_2.map(|(_seq, e)| e.num).collect::<HashSet<_>>()
+            );
         }
 
         {
             // Now third poller sees events.
             let mut guard_3 = ep3.poll().ok().unwrap();
-            assert_eq!(expected, guard_3.map(|e| e.num).collect::<HashSet<_>>());
+            assert_eq!(
+                expected,
+                guard_3.map(|(_seq, e)| e.num).collect::<HashSet<_>>()
+            );
         }
 
         // Dropping the producers should indicate shutdown to all pollers.
@@ -1112,7 +1122,7 @@ mod tests {
                 }
                 match poller.poll_wait(&mut waiter) {
                     Ok(mut events) => {
-                        for e in &mut events {
+                        for (_seq, e) in &mut events {
                             poller_log.lock().unwrap().push(format!("poll{}", e.num));
                         }
                     }
@@ -1235,7 +1245,7 @@ mod tests {
             // Only first poller sees events.
             let mut guard_1 = ep1.poll().ok().unwrap();
             assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(expected, guard_1.map(|e| e.num).collect::<Vec<_>>());
+            assert_eq!(expected, guard_1.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
         // Next poll should indicate shutdown to the poller.
         assert_eq!(ep1.poll().err(), Some(Polling::Shutdown));
@@ -1243,7 +1253,7 @@ mod tests {
         {
             // Now second poller sees events.
             let mut guard_2 = ep2.poll().ok().unwrap();
-            assert_eq!(expected, guard_2.map(|e| e.num).collect::<Vec<_>>());
+            assert_eq!(expected, guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         let mut result: Vec<i64> = r.iter().collect();
@@ -1481,7 +1491,7 @@ mod tests {
         for _ in 0..10 {
             match poller.poll() {
                 Ok(mut guard) => {
-                    for _ in &mut guard {
+                    for (_seq, _e) in &mut guard {
                         drained += 1;
                     }
                 }

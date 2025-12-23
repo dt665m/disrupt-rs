@@ -219,8 +219,9 @@ fn main() {
             Ok(mut events) => {
                 // `&mut events` implements ExactSizeIterator so events can be
                 // batch processed and handled with e.g. a for loop.
-                for event in &mut events {
+                for (sequence, event) in &mut events {
                     // Process events here.
+                    let _ = sequence;
                 }
             },// When guard (here named `events`) goes out of scope,
               // it signals to the Disruptor that reading is done.

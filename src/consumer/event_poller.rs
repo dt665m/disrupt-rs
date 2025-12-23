@@ -36,8 +36,9 @@ use thiserror::Error;
 ///             // Batch process events if efficient in your use case.
 ///             let batch_size = (&mut events).len();
 ///             // Read events with an iterator.
-///             for event in &mut events {
+///             for (sequence, event) in &mut events {
 ///                 println!("Processing event: {:?}", event);
+///                 let _ = sequence;
 ///             }
 ///         },// At this point the EventGuard (here named `events`) is dropped,
 ///           // signaling the Disruptor that the events have been processed.
@@ -80,25 +81,30 @@ pub struct EventGuard<'p, E, B> {
 /// could hold on to a reference to a en Event after the drop method was run for the
 /// `EventGuard` and a publisher could write to the immutable reference - UB.)
 impl<'g, E, B> Iterator for &'g mut EventGuard<'_, E, B> {
-    type Item = &'g E;
+    type Item = (Sequence, &'g E);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.sequence > self.available {
             return None;
         }
 
+        let sequence = self.sequence;
         // SAFETY: The Guard is authorized to read up to and including `available` sequence.
-        let event_ptr = unsafe { self.parent.ring_buffer.get(self.sequence).as_ptr() };
+        let event_ptr = unsafe { self.parent.ring_buffer.get(sequence).as_ptr() };
         let event = unsafe { &*event_ptr };
         self.sequence += 1;
-        Some(event)
+        Some((sequence, event))
     }
 }
 
 impl<E, B> ExactSizeIterator for &mut EventGuard<'_, E, B> {
     /// Returns the number of events available to read.
     fn len(&self) -> usize {
-        (self.available - self.sequence + 1) as usize
+        if self.sequence > self.available {
+            0
+        } else {
+            (self.available - self.sequence + 1) as usize
+        }
     }
 }
 
@@ -264,7 +270,8 @@ mod tests {
         let mut guard = poller
             .poll_wait(&mut waiter)
             .expect("should see published event");
-        let got = (&mut guard).next().unwrap().0;
+        let (_seq, got) = (&mut guard).next().unwrap();
+        let got = got.0;
         assert_eq!(got, 42);
         drop(guard);
 
