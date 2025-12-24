@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 ///
 /// Defaults to `-1`, matching the initial cursor used internally so a gated stage
 /// is blocked until explicitly advanced. Cache-line padded to reduce false sharing.
+#[derive(Debug)]
 #[repr(align(64))]
 pub struct DependentSequence(CachePadded<AtomicI64>);
 
