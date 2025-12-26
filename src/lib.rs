@@ -283,6 +283,7 @@ mod ringbuffer;
 mod sequence;
 pub mod wait_strategies;
 
+pub use crate::barrier::Barrier;
 pub use crate::builder::{build_multi_producer, build_single_producer, ProcessorSettings};
 pub use crate::consumer::event_poller::{EventGuard, EventPoller, Polling};
 pub use crate::consumer::{
