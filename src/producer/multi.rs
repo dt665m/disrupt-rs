@@ -94,6 +94,10 @@ where
     where
         F: for<'a> FnOnce(MutBatchIter<'a, E>),
     {
+        debug_assert!(
+            n <= self.ring_buffer.capacity() as usize,
+            "batch_publish(n) requires n <= ring buffer capacity"
+        );
         while self.next_sequences(n).is_err() {
             hint::spin_loop();
         }

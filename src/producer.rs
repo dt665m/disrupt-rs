@@ -155,6 +155,9 @@ pub trait Producer<E> {
     ///
     /// Note, publishing a batch of zero elements is a no-op (only wasting cycles).
     ///
+    /// If `n` is larger than the ring buffer size, the batch can never fit and this method will
+    /// always return `Err(MissingFreeSlots(_))`.
+    ///
     /// # Examples
     ///
     /// ```
@@ -215,6 +218,10 @@ pub trait Producer<E> {
     /// Spins until there are enough available slots in the ring buffer.
     ///
     /// Note, publishing a batch of zero elements is a no-op (only wasting cycles).
+    ///
+    /// # Warning
+    /// If `n` is larger than the ring buffer size, the batch can never fit and this method will
+    /// spin forever (livelock).
     ///
     /// # Examples
     ///

@@ -75,6 +75,20 @@ pub struct EventGuard<'p, E, B> {
     available: Sequence,
 }
 
+impl<E, B> EventGuard<'_, E, B> {
+    /// Returns the number of events available to read.
+    ///
+    /// This is identical to the `ExactSizeIterator::len` implementation, but provided as an
+    /// inherent method so callers don't need to pass `&mut` purely to compute length.
+    pub fn len(&self) -> usize {
+        if self.sequence > self.available {
+            0
+        } else {
+            (self.available - self.sequence + 1) as usize
+        }
+    }
+}
+
 /// The Iterator is implemented for the `&mut EventGuard` to bind the returned
 /// events' lifetime to the lifetime (`'g`) of the `EventGuard`.
 /// (And not the lifetime of the `EventPoller`. The latter would be catastrophic because a client
@@ -100,11 +114,7 @@ impl<'g, E, B> Iterator for &'g mut EventGuard<'_, E, B> {
 impl<E, B> ExactSizeIterator for &mut EventGuard<'_, E, B> {
     /// Returns the number of events available to read.
     fn len(&self) -> usize {
-        if self.sequence > self.available {
-            0
-        } else {
-            (self.available - self.sequence + 1) as usize
-        }
+        (**self).len()
     }
 }
 
