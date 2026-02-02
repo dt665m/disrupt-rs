@@ -75,14 +75,6 @@ impl<'a, E> Iterator for MutBatchIter<'a, E> {
         let remaining = self.remaining();
         (remaining, Some(remaining))
     }
-
-    #[inline]
-    fn count(self) -> usize
-    where
-        Self: Sized,
-    {
-        self.remaining()
-    }
 }
 
 impl<E> ExactSizeIterator for MutBatchIter<'_, E> {

@@ -52,7 +52,7 @@
 //! }
 //!
 //! // Define a factory for populating the ring buffer with events.
-//! let factory = || { Event { price: 0.0 }};
+//! let factory = || Event { price: 0.0 };
 //!
 //! // Define a closure for processing events. A thread, controlled by the disruptor, will run this
 //! // processor closure each time an event is published.
@@ -91,7 +91,7 @@
 //!     price: f64
 //! }
 //!
-//! let factory = || { Event { price: 0.0 }};
+//! let factory = || Event { price: 0.0 };
 //!
 //! let processor = |e: &Event, sequence: Sequence, end_of_batch: bool| {
 //!     // Processing logic.
@@ -126,7 +126,7 @@
 //! # #[cfg(not(miri))]
 //! fn main() {
 //!     // Factory closure for initializing events in the Ring Buffer.
-//!     let factory = || { Event { price: 0.0 }};
+//!     let factory = || Event { price: 0.0 };
 //!
 //!     // Closure for processing events.
 //!     let h1 = |e: &Event, sequence: Sequence, end_of_batch: bool| {
@@ -200,7 +200,7 @@
 //!     data: Rc<RefCell<i32>>
 //! }
 //!
-//! let factory = || { Event { price: 0.0 }};
+//! let factory = || Event { price: 0.0 };
 //! let initial_state = || { State::default() };
 //!
 //! // Closure for processing events *with* state.
@@ -233,7 +233,7 @@
 //!     price: f64
 //! }
 //!
-//! let factory = || { Event { price: 0.0 }};
+//! let factory = || Event { price: 0.0 };
 //! let builder = build_single_producer(8, factory, BusySpin);
 //! let (mut event_poller, builder) = builder.event_poller();
 //! let mut producer = builder.build();
@@ -248,20 +248,33 @@
 //!
 //! // Process events.
 //! loop {
+//!     // 1. Either poll for all available events.
 //!     match event_poller.poll() {
-//!         Ok(mut events) => {
+//!         Ok(mut guard) => {
 //!             // Batch process events if efficient in your use case.
-//!             let batch_size = (&mut events).len();
-//!             // Read events with an iterator.
-//!             for (sequence, event) in &mut events {
+//!             let batch_size = (&mut guard).len();
+//!             // Guard is an `Iterator` so read events by iterating.
+//!             for (sequence, event) in &mut guard {
 //!                 println!("Processing event: {:?}", event);
 //!                 let _ = sequence;
 //!             }
-//!             // At this point the EventGuard (here named `events`) is dropped,
+//!             // At this point the EventGuard is dropped,
 //!             // signaling the Disruptor that the events have been processed.
 //!         },
 //!         Err(Polling::NoEvents) => { /* Do other work or try again. */ },
 //!         Err(Polling::Shutdown) => { break; }, // Exit the loop if the Disruptor is shut down.
+//!     }
+//!     // 2. Or limit the maximum number of events yielded per poll.
+//!     match event_poller.poll_take(64) {
+//!         Ok(mut guard) => {
+//!             // Max 64 events (or fewer if less available) are yielded.
+//!             for (sequence, event) in &mut guard {
+//!                 println!("Processing event: {:?}", event);
+//!                 let _ = sequence;
+//!             }
+//!         },
+//!         Err(Polling::NoEvents) => { },
+//!         Err(Polling::Shutdown) => { break; },
 //!     }
 //! }
 //! ```
@@ -624,23 +637,17 @@ mod tests {
 
     #[test]
     fn spsc_disruptor_with_zero_batch_publication() {
-        let (s, r) = mpsc::channel();
-        let processor = move |e: &Event, _, _| {
-            s.send(e.num).expect("Should be able to send.");
+        let processor = |_e: &Event, _, _| {
+            panic!("No events should be published.");
         };
         let mut producer = build_single_producer(8, factory(), BusySpin)
             .handle_events_with(processor)
             .build();
 
         producer.batch_publish(0, |iter| {
-            for e in iter {
-                e.num = 1;
-            }
+            assert_eq!(0, iter.count());
         });
         drop(producer);
-
-        let result: Vec<_> = r.iter().collect();
-        assert_eq!(result, Vec::<i64>::new());
     }
 
     #[test]
@@ -859,15 +866,15 @@ mod tests {
         };
         let processor3 = {
             let s = s.clone();
-            move |e: &Event, _, _| {
-                s.send(e.num + 2).unwrap();
+            move |state: &mut RefCell<i64>, e: &Event, _, _| {
+                *state.borrow_mut() += e.num;
+                s.send(*state.borrow() + 20).unwrap();
             }
         };
         let processor4 = {
             let s = s.clone();
-            move |state: &mut RefCell<i64>, e: &Event, _, _| {
-                *state.borrow_mut() += e.num;
-                s.send(*state.borrow() + 20).unwrap();
+            move |e: &Event, _, _| {
+                s.send(e.num + 2).unwrap();
             }
         };
         let processor5 = {
@@ -877,9 +884,16 @@ mod tests {
             }
         };
         let processor6 = {
+            let s = s.clone();
             move |state: &mut RefCell<i64>, e: &Event, _, _| {
                 *state.borrow_mut() += e.num;
                 s.send(*state.borrow() + 30).unwrap();
+            }
+        };
+        let processor7 = {
+            move |state: &mut RefCell<i64>, e: &Event, _, _| {
+                *state.borrow_mut() += e.num;
+                s.send(*state.borrow() + 40).unwrap();
             }
         };
 
@@ -889,11 +903,12 @@ mod tests {
             .handle_events_with(processor1)
             .handle_events_and_state_with(processor2, || RefCell::new(0))
             .and_then()
-            .handle_events_with(processor3)
-            .handle_events_and_state_with(processor4, || RefCell::new(0))
+            .handle_events_and_state_with(processor3, || RefCell::new(0))
+            .handle_events_with(processor4)
             .and_then()
             .handle_events_with(processor5)
             .handle_events_and_state_with(processor6, || RefCell::new(0))
+            .handle_events_and_state_with(processor7, || RefCell::new(0))
             .build();
 
         producer.publish(|e| {
@@ -903,7 +918,7 @@ mod tests {
 
         let mut result: Vec<i64> = r.iter().collect();
         result.sort();
-        assert_eq!(vec![1, 3, 5, 11, 21, 31], result);
+        assert_eq!(vec![1, 3, 5, 11, 21, 31, 41], result);
     }
 
     #[test]
@@ -943,9 +958,16 @@ mod tests {
             }
         };
         let processor6 = {
+            let s = s.clone();
             move |state: &mut RefCell<i64>, e: &Event, _, _| {
                 *state.borrow_mut() += e.num;
                 s.send(*state.borrow() + 30).unwrap();
+            }
+        };
+        let processor7 = {
+            move |state: &mut RefCell<i64>, e: &Event, _, _| {
+                *state.borrow_mut() += e.num;
+                s.send(*state.borrow() + 40).unwrap();
             }
         };
 
@@ -959,6 +981,7 @@ mod tests {
             .and_then()
             .handle_events_with(processor5)
             .handle_events_and_state_with(processor6, || RefCell::new(0))
+            .handle_events_and_state_with(processor7, || RefCell::new(0))
             .build();
 
         let mut producer2 = producer1.clone();
@@ -975,7 +998,10 @@ mod tests {
 
         let mut result: Vec<i64> = r.iter().collect();
         result.sort();
-        assert_eq!(vec![1, 1, 3, 3, 5, 5, 11, 12, 21, 22, 31, 32], result);
+        assert_eq!(
+            vec![1, 1, 3, 3, 5, 5, 11, 12, 21, 22, 31, 32, 41, 42],
+            result
+        );
     }
 
     #[test]
@@ -1003,22 +1029,29 @@ mod tests {
 
         {
             // Only first poller sees events.
-            let mut guard_1 = ep1.poll().ok().unwrap();
+            let mut guard_1 = ep1.poll().unwrap();
+            assert_eq!(2, (&mut guard_1).len());
             assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
+            assert_eq!(ep2.poll_take(2).err(), Some(Polling::NoEvents));
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
+            assert_eq!(ep3.poll_take(2).err(), Some(Polling::NoEvents));
             assert_eq!(expected, guard_1.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         {
-            // Now second poller sees events.
-            let mut guard_2 = ep2.poll().ok().unwrap();
+            // Now second poller sees events - here one at a time.
+            let mut guard_2 = ep2.poll_take(1).unwrap();
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(expected, guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
+            assert_eq!(vec![1], guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
+            drop(guard_2);
+            // Read next event.
+            let mut guard_2 = ep2.poll_take(1).unwrap();
+            assert_eq!(vec![2], guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         {
-            // Now third poller sees events.
-            let mut guard_3 = ep3.poll().ok().unwrap();
+            // Now third poller sees both events.
+            let mut guard_3 = ep3.poll().unwrap();
             assert_eq!(expected, guard_3.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
@@ -1055,7 +1088,7 @@ mod tests {
 
         {
             // Only first poller sees events.
-            let mut guard_1 = ep1.poll().ok().unwrap();
+            let mut guard_1 = ep1.poll().unwrap();
             assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
             assert_eq!(
@@ -1065,18 +1098,19 @@ mod tests {
         }
 
         {
-            // Now second poller sees events.
-            let mut guard_2 = ep2.poll().ok().unwrap();
+            // Now second poller sees events - here one at a time.
+            let mut guard_2 = ep2.poll_take(1).unwrap();
             assert_eq!(ep3.poll().err(), Some(Polling::NoEvents));
-            assert_eq!(
-                expected,
-                guard_2.map(|(_seq, e)| e.num).collect::<HashSet<_>>()
-            );
+            assert_eq!(vec![1], guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
+            drop(guard_2);
+            // Read next event.
+            let mut guard_2 = ep2.poll_take(1).unwrap();
+            assert_eq!(vec![2], guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
         {
-            // Now third poller sees events.
-            let mut guard_3 = ep3.poll().ok().unwrap();
+            // Now third poller sees both events.
+            let mut guard_3 = ep3.poll().unwrap();
             assert_eq!(
                 expected,
                 guard_3.map(|(_seq, e)| e.num).collect::<HashSet<_>>()
@@ -1244,7 +1278,7 @@ mod tests {
 
         {
             // Only first poller sees events.
-            let mut guard_1 = ep1.poll().ok().unwrap();
+            let mut guard_1 = ep1.poll().unwrap();
             assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
             assert_eq!(expected, guard_1.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
@@ -1253,7 +1287,57 @@ mod tests {
 
         {
             // Now second poller sees events.
-            let mut guard_2 = ep2.poll().ok().unwrap();
+            let mut guard_2 = ep2.poll().unwrap();
+            assert_eq!(expected, guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
+        }
+
+        let mut result: Vec<i64> = r.iter().collect();
+        result.sort();
+        assert_eq!(expected, result);
+    }
+
+    #[test]
+    fn mpmc_with_mixed_event_pollers_and_processors() {
+        let (s, r) = mpsc::channel();
+        let processor1 = move |e: &Event, _, _| {
+            s.send(e.num).unwrap();
+        };
+
+        let builder = build_multi_producer(64, factory(), BusySpin).handle_events_with(processor1);
+        let (mut ep1, b) = builder.event_poller();
+        let (mut ep2, b) = b.and_then().event_poller();
+        let mut producer1 = b.build();
+        let mut producer2 = producer1.clone();
+
+        // Polling before publication should yield no events.
+        assert_eq!(ep1.poll().err(), Some(Polling::NoEvents));
+        assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
+
+        // Publish two events.
+        producer1.publish(|e| {
+            e.num = 1;
+        });
+        producer2.publish(|e| {
+            e.num = 2;
+        });
+        drop(producer1);
+        drop(producer2);
+
+        let expected = vec![1, 2];
+
+        {
+            // Only first poller sees events.
+            let mut guard_1 = ep1.poll().unwrap();
+            assert_eq!(ep2.poll().err(), Some(Polling::NoEvents));
+            assert_eq!(expected, guard_1.map(|(_seq, e)| e.num).collect::<Vec<_>>());
+        }
+
+        // Next poll should indicate shutdown to the poller.
+        assert_eq!(ep1.poll().err(), Some(Polling::Shutdown));
+
+        {
+            // Now second poller sees events.
+            let mut guard_2 = ep2.poll().unwrap();
             assert_eq!(expected, guard_2.map(|(_seq, e)| e.num).collect::<Vec<_>>());
         }
 
@@ -1274,7 +1358,6 @@ mod tests {
         }
 
         let (s_seq, r_seq) = mpsc::channel();
-        let (s_error, r_error) = mpsc::channel();
         let num_events = 250_000;
         let producers = 4;
         let consumers = 3;
@@ -1282,28 +1365,23 @@ mod tests {
         let mut processors: Vec<_> = (0..consumers)
             .into_iter()
             .map(|pid| {
-                let s_error = s_error.clone();
                 let s_seq = s_seq.clone();
                 let mut prev_seq = -1;
                 Some(move |e: &StressEvent, sequence, _| {
-                    if e.a != e.i - 5
-                        || e.b != e.i + 7
-                        || e.s != format!("Blackbriar {}", e.i).to_string()
-                        || sequence != prev_seq + 1
-                    {
-                        s_error.send(1).expect("Should send.");
-                    } else {
-                        prev_seq = sequence;
-                        let sequence_seen_by_pid = sequence * consumers + pid;
-                        s_seq.send(sequence_seen_by_pid).expect("Should send.");
-                    }
+                    assert_eq!(e.a, e.i - 5);
+                    assert_eq!(e.b, e.i + 7);
+                    assert_eq!(e.s, format!("Blackbriar {}", e.i).to_string());
+                    assert_eq!(sequence, prev_seq + 1);
+
+                    prev_seq = sequence;
+                    let sequence_seen_by_pid = sequence * consumers + pid;
+                    s_seq.send(sequence_seen_by_pid).expect("Should send.");
                 })
             })
             .collect();
 
-        // Drop unused Senders.
+        // Drop unused Sender.
         drop(s_seq);
-        drop(s_error);
 
         let factory = || StressEvent {
             i: -1,
@@ -1336,10 +1414,7 @@ mod tests {
         });
 
         let expected_sequence_reads = consumers * num_events * producers;
-        let errors: Vec<_> = r_error.iter().collect();
         let mut seen_sequences: Vec<_> = r_seq.iter().collect();
-
-        assert!(errors.is_empty());
         assert_eq!(expected_sequence_reads as usize, seen_sequences.len());
         // Assert that each consumer saw each sequence number.
         seen_sequences.sort();
