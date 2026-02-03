@@ -1,4 +1,4 @@
-use disruptor::*;
+use disrupt_rs::*;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -31,7 +31,7 @@ fn main() {
         }
     };
 
-    let mut producer = disruptor::build_single_producer(256, factory, BusySpin)
+    let mut producer = disrupt_rs::build_single_producer(256, factory, BusySpin)
         .handle_events_with(processor0)
         .handle_events_with(processor1)
         .build();

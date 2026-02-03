@@ -1,4 +1,4 @@
-use disruptor::*;
+use disrupt_rs::*;
 
 #[derive(Debug)]
 enum Event {
@@ -36,7 +36,7 @@ fn main() {
         Event::Heartbeat => {}
     };
 
-    let mut producer = disruptor::build_multi_producer(64, factory, BusySpin)
+    let mut producer = disrupt_rs::build_multi_producer(64, factory, BusySpin)
         .handle_events_with(processor)
         .build();
 

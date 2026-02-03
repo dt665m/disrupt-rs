@@ -7,7 +7,7 @@ use crossbeam::channel::{
     TryRecvError::{Disconnected, Empty},
     TrySendError::Full,
 };
-use disruptor::{BusySpin, LiteBlockingWaitStrategy, Producer};
+use disrupt_rs::{BusySpin, LiteBlockingWaitStrategy, Producer};
 use std::{
     hint::black_box,
     sync::{
@@ -142,7 +142,7 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &s
             }
         }
     };
-    let mut producer = disruptor::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
+    let mut producer = disrupt_rs::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
         .handle_events_with(processor)
         .build();
     let benchmark_id = BenchmarkId::new("disruptor", &param);
@@ -182,7 +182,7 @@ fn disruptor_liteblocking(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u6
             }
         }
     };
-    let mut producer = disruptor::build_single_producer(
+    let mut producer = disrupt_rs::build_single_producer(
         DATA_STRUCTURE_SIZE,
         factory,
         LiteBlockingWaitStrategy::default(),

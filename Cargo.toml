@@ -1,11 +1,11 @@
 [package]
-name = "disruptor"
-version = "3.6.1"
+name = "disrupt-rs"
+version = "1.0.0"
 edition = "2021"
 description = "Low latency inter-thread communication via a ringbuffer (inspired by the LMAX Disruptor)."
 license = "MIT"
 authors = ["Nicholas <nicholassm@gmail.com>"]
-repository = "https://github.com/nicholassm/disruptor-rs"
+repository = "https://github.com/dt665m/disrupt-rs"
 categories = ["data-structures", "concurrency"]
 keywords = ["disruptor", "ringbuffer", "message", "mpmc"]
 

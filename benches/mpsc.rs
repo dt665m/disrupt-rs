@@ -8,7 +8,7 @@ use crossbeam::channel::{
     TrySendError::Full,
 };
 use crossbeam_utils::CachePadded;
-use disruptor::{BusySpin, Producer};
+use disrupt_rs::{BusySpin, Producer};
 use std::{
     hint::black_box,
     sync::{
@@ -236,7 +236,7 @@ fn disruptor(group: &mut BenchmarkGroup<WallTime>, params: (i64, u64), param_des
             sink.fetch_add(1, Relaxed);
         }
     };
-    let producer = disruptor::build_multi_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
+    let producer = disrupt_rs::build_multi_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
         .handle_events_with(processor)
         .build();
     let benchmark_id = BenchmarkId::new("disruptor", &param_description);

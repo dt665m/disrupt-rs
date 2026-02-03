@@ -42,7 +42,7 @@
 //! ### Basic Usage
 //!
 //! ```
-//! use disruptor::*;
+//! use disrupt_rs::*;
 //!
 //! // *** Phase SETUP ***
 //!
@@ -84,7 +84,7 @@
 //! ### Batch Publication:
 //!
 //! ```
-//! use disruptor::*;
+//! use disrupt_rs::*;
 //!
 //! // The data entity on the ring buffer.
 //! struct Event {
@@ -114,7 +114,7 @@
 //!
 //! ###  Multiple Producers and Multiple, Pinned Consumers
 //! ```
-//! use disruptor::*;
+//! use disrupt_rs::*;
 //! use std::thread;
 //!
 //! // The event on the ring buffer.
@@ -139,7 +139,7 @@
 //!         // More processing logic here.
 //!     };
 //!
-//!     let mut producer1 = disruptor::build_multi_producer(64, factory, BusySpin)
+//!     let mut producer1 = disrupt_rs::build_multi_producer(64, factory, BusySpin)
 //!         // `h2` handles events concurrently with `h1`.
 //!         .pin_at_core(1).handle_events_with(h1)
 //!         .pin_at_core(2).handle_events_with(h2)
@@ -187,7 +187,7 @@
 //!
 //! ```
 //! use std::{cell::RefCell, rc::Rc};
-//! use disruptor::*;
+//! use disrupt_rs::*;
 //!
 //! // The event on the ring buffer.
 //! struct Event {
@@ -210,7 +210,7 @@
 //! };
 //!
 //! let size = 64;
-//! let mut producer = disruptor::build_single_producer(size, factory, BusySpin)
+//! let mut producer = disrupt_rs::build_single_producer(size, factory, BusySpin)
 //!     .handle_events_and_state_with(processor, initial_state)
 //!     .build();
 //!
@@ -225,7 +225,7 @@
 //! ### Event Polling API
 //!
 //! ```
-//! use disruptor::*;
+//! use disrupt_rs::*;
 //!
 //! // The data entity on the ring buffer.
 //! #[derive(Debug)]

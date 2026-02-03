@@ -2,7 +2,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion,
     Throughput,
 };
-use disruptor::{BusySpin, Producer};
+use disrupt_rs::{BusySpin, Producer};
 use std::{
     hint::black_box,
     sync::{
@@ -72,7 +72,7 @@ fn base(group: &mut BenchmarkGroup<WallTime>, burst_size: i64) {
 fn polling(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str) {
     let factory = || Event { data: 0 };
 
-    let builder = disruptor::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin);
+    let builder = disrupt_rs::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin);
     let (mut poller, builder) = builder.event_poller();
     let mut producer = builder.build();
 
@@ -90,8 +90,8 @@ fn polling(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &str
                         }
                     }
                 }
-                Err(disruptor::Polling::NoEvents) => continue,
-                Err(disruptor::Polling::Shutdown) => break,
+                Err(disrupt_rs::Polling::NoEvents) => continue,
+                Err(disrupt_rs::Polling::Shutdown) => break,
             }
         })
     };
@@ -136,7 +136,7 @@ fn processing(group: &mut BenchmarkGroup<WallTime>, inputs: (i64, u64), param: &
             }
         }
     };
-    let mut producer = disruptor::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
+    let mut producer = disrupt_rs::build_single_producer(DATA_STRUCTURE_SIZE, factory, BusySpin)
         .handle_events_with(processor)
         .build();
     let benchmark_id = BenchmarkId::new("processing", &param);

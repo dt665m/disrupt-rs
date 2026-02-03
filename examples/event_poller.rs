@@ -1,4 +1,4 @@
-use disruptor::*;
+use disrupt_rs::*;
 use std::thread;
 
 // The event on the ring buffer.
@@ -11,7 +11,7 @@ fn main() {
     let factory = || Event { price: 0.0 };
 
     let size = 64;
-    let builder = disruptor::build_single_producer(size, factory, BusySpin);
+    let builder = disrupt_rs::build_single_producer(size, factory, BusySpin);
     let (mut poller, builder) = builder.event_poller();
     let mut producer = builder.build();
 

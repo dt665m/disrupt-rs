@@ -119,7 +119,7 @@ pub trait Producer<E> {
     /// # Examples
     ///
     /// ```
-    ///# use disruptor::*;
+    ///# use disrupt_rs::*;
     ///#
     /// // The example data entity on the ring buffer.
     /// struct Event {
@@ -153,7 +153,7 @@ pub trait Producer<E> {
     /// # Examples
     ///
     /// ```
-    ///# use disruptor::*;
+    ///# use disrupt_rs::*;
     ///#
     /// // The example data entity on the ring buffer.
     /// struct Event {
@@ -186,7 +186,7 @@ pub trait Producer<E> {
     /// # Examples
     ///
     /// ```
-    ///# use disruptor::*;
+    ///# use disrupt_rs::*;
     ///#
     /// // The example data entity on the ring buffer.
     /// struct Event {
@@ -218,7 +218,7 @@ pub trait Producer<E> {
     /// # Examples
     ///
     /// ```
-    ///# use disruptor::*;
+    ///# use disrupt_rs::*;
     ///#
     /// // The example data entity on the ring buffer.
     /// struct Event {

@@ -1,4 +1,4 @@
-use disruptor::{build_multi_producer, BusySpin, ProcessorSettings, Producer, Sequence};
+use disrupt_rs::{build_multi_producer, BusySpin, ProcessorSettings, Producer, Sequence};
 use std::thread;
 
 struct Event {
@@ -8,7 +8,7 @@ struct Event {
 fn maybe_pin<B, E, W>(builder: B, core_id: Option<usize>) -> B
 where
     B: ProcessorSettings<E, W>,
-    W: disruptor::wait_strategies::WaitStrategy,
+    W: disrupt_rs::wait_strategies::WaitStrategy,
 {
     match core_id {
         Some(id) => builder.pin_at_core(id),

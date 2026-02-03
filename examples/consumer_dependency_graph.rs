@@ -1,4 +1,4 @@
-use disruptor::{build_single_producer, BusySpin, DependentSequence, Producer, Sequence};
+use disrupt_rs::{build_single_producer, BusySpin, DependentSequence, Producer, Sequence};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,

@@ -35,7 +35,7 @@ pub struct MC;
 /// # Examples
 ///
 /// ```
-///# use disruptor::*;
+///# use disrupt_rs::*;
 ///#
 /// // The example data entity on the ring buffer.
 /// struct Event {
@@ -83,7 +83,7 @@ where
 /// # Examples
 ///
 /// ```
-///# use disruptor::*;
+///# use disrupt_rs::*;
 ///#
 /// // The example data entity on the ring buffer.
 /// struct Event {
@@ -134,7 +134,7 @@ where
 ///# #[cfg(miri)] fn main() {}
 ///# #[cfg(not(miri))]
 ///# fn main() {
-///# use disruptor::*;
+///# use disrupt_rs::*;
 ///#
 /// // The example data entity on the ring buffer.
 /// struct Event {

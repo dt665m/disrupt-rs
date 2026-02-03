@@ -4,7 +4,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use crossbeam::channel::*;
-use disruptor::{build_multi_producer, build_single_producer, BusySpin, Producer};
+use disrupt_rs::{build_multi_producer, build_single_producer, BusySpin, Producer};
 use std::{
     hint::black_box,
     sync::{

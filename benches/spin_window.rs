@@ -2,7 +2,7 @@ use criterion::{
     criterion_group, criterion_main, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion,
     Throughput,
 };
-use disruptor::{BusySpin, LiteBlockingWaitStrategy, Producer};
+use disrupt_rs::{BusySpin, LiteBlockingWaitStrategy, Producer};
 use std::{
     hint::{black_box, spin_loop},
     sync::{
@@ -42,7 +42,7 @@ fn bench_busyspin(group: &mut BenchmarkGroup<WallTime>, gap_spins: u32) {
         }
     };
 
-    let mut producer = disruptor::build_single_producer(RING_SIZE, Event::default, BusySpin)
+    let mut producer = disrupt_rs::build_single_producer(RING_SIZE, Event::default, BusySpin)
         .handle_events_with(processor)
         .build();
 
@@ -87,7 +87,7 @@ fn bench_liteblocking_spin(group: &mut BenchmarkGroup<WallTime>, gap_spins: u32,
     // data, but the producer publishes again quickly enough that the waiter typically satisfies
     // the next wait during the spin window (i.e., it doesn't sleep).
     let strategy = LiteBlockingWaitStrategy::default().with_spin_tries(spin_tries);
-    let mut producer = disruptor::build_single_producer(RING_SIZE, Event::default, strategy)
+    let mut producer = disrupt_rs::build_single_producer(RING_SIZE, Event::default, strategy)
         .handle_events_with(processor)
         .build();
 

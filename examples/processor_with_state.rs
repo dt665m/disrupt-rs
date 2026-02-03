@@ -1,4 +1,4 @@
-use disruptor::*;
+use disrupt_rs::*;
 use std::{cell::RefCell, rc::Rc};
 
 struct Event {
@@ -23,7 +23,7 @@ fn main() {
     };
 
     let size = 64;
-    let mut producer = disruptor::build_single_producer(size, factory, BusySpin)
+    let mut producer = disrupt_rs::build_single_producer(size, factory, BusySpin)
         .handle_events_and_state_with(processor, initial_state)
         .build();
 

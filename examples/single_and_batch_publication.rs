@@ -1,4 +1,4 @@
-use disruptor::*;
+use disrupt_rs::*;
 
 // The event on the ring buffer.
 struct Event {
@@ -16,7 +16,7 @@ fn main() {
     };
 
     let size = 64;
-    let mut producer = disruptor::build_single_producer(size, factory, BusySpin)
+    let mut producer = disrupt_rs::build_single_producer(size, factory, BusySpin)
         .handle_events_with(processor)
         .build();
 

@@ -18,7 +18,7 @@ use thiserror::Error;
 /// The EventPoller supports batch reading and can be used to process events in a loop.
 ///
 /// ```
-///# use disruptor::*;
+///# use disrupt_rs::*;
 ///#
 ///# #[derive(Debug)]
 ///# struct Event {
@@ -180,7 +180,7 @@ where
     /// # Examples
     ///
     /// ```
-    ///# use disruptor::*;
+    ///# use disrupt_rs::*;
     ///#
     ///# #[derive(Debug)]
     ///# struct Event {
@@ -217,7 +217,7 @@ where
     /// # Examples
     ///
     /// ```
-    ///# use disruptor::*;
+    ///# use disrupt_rs::*;
     ///#
     ///# #[derive(Debug)]
     ///# struct Event {

@@ -1,4 +1,4 @@
-use disruptor::{
+use disrupt_rs::{
     build_multi_producer, build_single_producer, EventHandler, EventHandlerWithState, Producer,
     YieldingWaitStrategy,
 };

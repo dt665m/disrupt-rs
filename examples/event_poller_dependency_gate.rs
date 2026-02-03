@@ -1,5 +1,5 @@
-use disruptor::wait_strategies::WaitStrategy;
-use disruptor::{build_single_producer, BusySpin, DependentSequence, Polling, Producer, Sequence};
+use disrupt_rs::wait_strategies::WaitStrategy;
+use disrupt_rs::{build_single_producer, BusySpin, DependentSequence, Polling, Producer, Sequence};
 use std::sync::Arc;
 
 #[derive(Debug, Default)]

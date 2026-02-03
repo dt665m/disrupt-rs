@@ -42,7 +42,7 @@ where
 /// ```no_run
 /// use std::{cell::RefCell, rc::Rc};
 ///
-/// use disruptor::{build_single_producer, BusySpin, Producer, Sequence};
+/// use disrupt_rs::{build_single_producer, BusySpin, Producer, Sequence};
 ///
 /// #[derive(Default)]
 /// struct State {
