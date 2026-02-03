@@ -1,15 +1,13 @@
 [package]
 name = "disrupt-rs"
 version = "1.0.0"
-edition = "2021"
-description = "Low latency inter-thread communication via a ringbuffer (inspired by the LMAX Disruptor)."
+edition = "2024"
+description = "Concurrent Ringbuffer inspired by the LMAX Disruptor."
 license = "MIT"
-authors = ["Nicholas <nicholassm@gmail.com>"]
+authors = ["Denis Tsai <denistsai@aetheras.io>"]
 repository = "https://github.com/dt665m/disrupt-rs"
 categories = ["data-structures", "concurrency"]
-keywords = ["disruptor", "ringbuffer", "message", "mpmc"]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+keywords = ["disruptor", "ringbuffer", "message", "mpmc", "spmc"]
 
 [dependencies]
 crossbeam-utils = "0.8"
