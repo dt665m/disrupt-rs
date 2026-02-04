@@ -302,8 +302,9 @@ pub use crate::consumer::event_poller::{EventGuard, EventPoller, Polling};
 pub use crate::consumer::{
     MultiConsumerBarrier, MultiConsumerDependentsBarrier, SingleConsumerBarrier,
 };
-pub use crate::event_handler::EventHandler;
-pub use crate::event_handler::EventHandlerWithState;
+pub use crate::event_handler::{
+    EventHandler, EventHandlerChainExt, EventHandlerWithState, HandlerChain,
+};
 pub use crate::producer::{
     multi::{MultiProducer, MultiProducerBarrier},
     single::{SingleProducer, SingleProducerBarrier},

@@ -54,7 +54,8 @@ drop(producer);
 loop {
     match poller.poll() {
         Ok(mut guard) => {
-            for (_sequence, event) in &mut guard {
+            for (sequence, event) in &mut guard {
+                let _ = sequence;
                 let _ = event.value;
             }
         }
