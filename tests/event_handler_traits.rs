@@ -1,6 +1,6 @@
 use disrupt_rs::{
-    build_multi_producer, build_single_producer, EventHandler, EventHandlerWithState, Producer,
-    YieldingWaitStrategy,
+    build_multi_producer, build_single_producer, EventHandler, EventHandlerChainExt,
+    EventHandlerWithState, Producer, YieldingWaitStrategy,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -36,6 +36,39 @@ impl EventHandlerWithState<Event, State> for StatefulHandler {
         state.local += 1;
         // Make state mutation observable outside the consumer thread.
         state.published.store(state.local, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn chained_handlers_run_in_order() {
+    use std::sync::Mutex;
+
+    let log: Arc<Mutex<Vec<(usize, u8)>>> = Arc::new(Mutex::new(Vec::new()));
+    let log_first = Arc::clone(&log);
+    let log_second = Arc::clone(&log);
+
+    let handler1 = move |event: &Event, _seq: i64, _eob: bool| {
+        log_first.lock().unwrap().push((event.value, 1));
+    };
+    let handler2 = move |event: &Event, _seq: i64, _eob: bool| {
+        log_second.lock().unwrap().push((event.value, 2));
+    };
+
+    let mut producer = build_single_producer(8, Event::default, YieldingWaitStrategy)
+        .handle_events_with(handler1.chain(handler2))
+        .build();
+
+    for i in 0..16 {
+        producer.publish(|e| e.value = i);
+    }
+
+    drop(producer);
+
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 32);
+    for i in 0..16 {
+        assert_eq!(log[i * 2], (i, 1));
+        assert_eq!(log[i * 2 + 1], (i, 2));
     }
 }
 
