@@ -9,6 +9,47 @@ pub trait EventHandler<E>: Send {
     fn on_event(&mut self, event: &E, sequence: Sequence, end_of_batch: bool);
 }
 
+/// A handler that forwards events to two handlers in sequence.
+#[derive(Debug, Clone, Default)]
+pub struct HandlerChain<H1, H2> {
+    first: H1,
+    second: H2,
+}
+
+impl<H1, H2> HandlerChain<H1, H2> {
+    /// Create a new chained handler.
+    #[inline]
+    pub fn new(first: H1, second: H2) -> Self {
+        Self { first, second }
+    }
+}
+
+impl<E, H1, H2> EventHandler<E> for HandlerChain<H1, H2>
+where
+    H1: EventHandler<E>,
+    H2: EventHandler<E>,
+{
+    #[inline]
+    fn on_event(&mut self, event: &E, sequence: Sequence, end_of_batch: bool) {
+        self.first.on_event(event, sequence, end_of_batch);
+        self.second.on_event(event, sequence, end_of_batch);
+    }
+}
+
+/// Extension trait for chaining event handlers together.
+pub trait EventHandlerChainExt<E>: EventHandler<E> + Sized {
+    /// Chain this handler with another handler, invoking both in order.
+    #[inline]
+    fn chain<H>(self, other: H) -> HandlerChain<Self, H>
+    where
+        H: EventHandler<E>,
+    {
+        HandlerChain::new(self, other)
+    }
+}
+
+impl<E, T> EventHandlerChainExt<E> for T where T: EventHandler<E> + Sized {}
+
 impl<E, F> EventHandler<E> for F
 where
     F: FnMut(&E, Sequence, bool) + Send,
