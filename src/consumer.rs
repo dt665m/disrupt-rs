@@ -48,7 +48,7 @@ pub struct MultiConsumerBarrier {
 /// Barrier that tracks minimum of a group of consumers plus optional external gating sequences.
 pub struct MultiConsumerDependentsBarrier {
     cursors: Vec<Arc<Cursor>>,
-    dependent_sequences: Vec<Arc<DependentSequence>>,
+    dependent_sequences: Vec<DependentSequence>,
 }
 
 #[inline]
@@ -95,7 +95,7 @@ impl Barrier for MultiConsumerBarrier {
 impl MultiConsumerDependentsBarrier {
     pub(crate) fn new(
         cursors: Vec<Arc<Cursor>>,
-        dependent_sequences: Vec<Arc<DependentSequence>>,
+        dependent_sequences: Vec<DependentSequence>,
     ) -> Self {
         Self {
             cursors,
@@ -253,8 +253,8 @@ mod tests {
         c1.store(10);
         c2.store(12);
 
-        let gating_low = Arc::new(DependentSequence::with_value(5));
-        let gating_high = Arc::new(DependentSequence::with_value(20));
+        let gating_low = DependentSequence::with_value(5);
+        let gating_high = DependentSequence::with_value(20);
 
         let barrier =
             MultiConsumerDependentsBarrier::new(vec![c1.clone(), c2.clone()], vec![gating_low]);
@@ -271,7 +271,7 @@ mod tests {
         c1.store(8);
         c2.store(9);
 
-        let dep = Arc::new(DependentSequence::with_value(7));
+        let dep = DependentSequence::with_value(7);
         let barrier =
             MultiConsumerDependentsBarrier::new(vec![c1.clone(), c2.clone()], vec![dep.clone()]);
         assert_eq!(7, barrier.get_after(0));

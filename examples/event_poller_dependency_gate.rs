@@ -1,6 +1,5 @@
 use disrupt_rs::wait_strategies::WaitStrategy;
-use disrupt_rs::{build_single_producer, BusySpin, DependentSequence, Polling, Producer, Sequence};
-use std::sync::Arc;
+use disrupt_rs::{build_single_producer, BusySpin, Polling, Producer, Sequence};
 
 #[derive(Debug, Default)]
 struct Event {
@@ -16,15 +15,14 @@ fn wal_fsync() {
 }
 
 fn main() {
-    let gate = Arc::new(DependentSequence::new());
-
     // Stage 1: poller (user-managed).
     let (mut poller, builder) =
         build_single_producer(1024, Event::default, BusySpin).event_poller();
 
-    // Stage 2: runs only after BOTH the poller cursor and `gate` have advanced.
+    let (builder, [gated_gate]) = builder.new_gates::<1>();
+    let builder = builder.and_then_with_dependents(&[gated_gate.clone()]);
+
     let mut producer = builder
-        .and_then_with_dependents(vec![gate.clone()])
         .handle_events_with(|e: &Event, seq: Sequence, _eob: bool| {
             println!("downstream sees seq={seq} value={}", e.value);
         })
@@ -51,7 +49,7 @@ fn main() {
 
                 if let Some(last_seq) = last_seq {
                     wal_fsync(); // durability boundary
-                    gate.set(last_seq); // release downstream up to `last_seq`
+                    gated_gate.set(last_seq); // release downstream up to `last_seq` (auto-wakes)
                 }
                 // `events` dropped here -> poller cursor advances to the polled upper bound.
             }

@@ -191,15 +191,17 @@ where
         self.shared().add_consumer_and_cursor(consumer, cursor);
     }
 
-    fn get_event_poller(&mut self) -> EventPoller<E, B> {
+    fn get_event_poller(&mut self) -> EventPoller<E, B, W::Notifier> {
         let cursor = Arc::new(Cursor::new(-1)); // Initially, the consumer has not read slot 0 yet.
         self.shared().add_cursor(Arc::clone(&cursor));
+        let notifier = self.shared().notifier.clone();
 
         EventPoller::new(
             Arc::clone(&self.shared().ring_buffer),
             Arc::clone(&self.dependent_barrier()),
             Arc::clone(&self.shared().shutdown_at_sequence),
             cursor,
+            notifier,
         )
     }
 

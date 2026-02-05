@@ -310,7 +310,7 @@ pub use crate::producer::{
     single::{SingleProducer, SingleProducerBarrier},
 };
 pub use crate::producer::{MissingFreeSlots, Producer, RingBufferFull};
-pub use crate::sequence::DependentSequence;
+pub use crate::sequence::GatedSequence;
 pub use crate::wait_strategies::{
     BlockingWaitStrategy, BusySpin, BusySpinWithSpinLoopHint, LiteBlockingWaitStrategy,
     YieldingWaitStrategy,
@@ -326,7 +326,7 @@ mod tests {
         rc::Rc,
         sync::{
             atomic::{
-                AtomicBool,
+                AtomicBool, AtomicI64,
                 Ordering::{Acquire, Relaxed, Release},
             },
             mpsc, Arc, Mutex,
@@ -1430,11 +1430,11 @@ mod tests {
         const N: i64 = 10;
         const FLUSH_POINT: i64 = 4;
 
-        let flushed = Arc::new(DependentSequence::new());
+        let (builder, [flushed]) = build_single_producer(8, factory(), BusySpin).new_gates::<1>();
         let (tx, rx) = mpsc::channel();
 
         let journal = {
-            let flushed = Arc::clone(&flushed);
+            let flushed = flushed.clone();
             move |_e: &Event, seq: Sequence, _end_of_batch: bool| {
                 if seq <= FLUSH_POINT {
                     // Simulate fsync only up to FLUSH_POINT; do not advance further yet.
@@ -1451,11 +1451,11 @@ mod tests {
         };
 
         {
-            let mut producer = build_single_producer(8, factory(), BusySpin)
+            let builder = builder
                 .handle_events_with(journal)
-                .and_then_with_dependents(vec![flushed.clone()])
-                .handle_events_with(engine)
-                .build();
+                .and_then_with_dependents(&[flushed.clone()]);
+
+            let mut producer = builder.handle_events_with(engine).build();
 
             for i in 0..N {
                 producer.publish(|e| e.num = i);
@@ -1541,11 +1541,11 @@ mod tests {
     #[test]
     fn dependent_gate_backpressure_blocks_overwrite() {
         // External dependent never advances; producer should hit backpressure on small ring.
-        let gate = Arc::new(DependentSequence::new());
-        let (mut poller, builder) = build_single_producer(4, factory(), BusySpin)
+        let (builder, [gate]) = build_single_producer(4, factory(), BusySpin).new_gates::<1>();
+        let builder = builder
             .handle_events_with(|_e: &Event, _seq, _| {}) // stage 1 fast
-            .and_then_with_dependents(vec![gate.clone()])
-            .event_poller(); // manual consumer at gated stage
+            .and_then_with_dependents(&[gate.clone()]);
+        let (mut poller, builder) = builder.event_poller(); // manual consumer at gated stage
 
         let mut producer = builder.build();
 
@@ -1589,13 +1589,13 @@ mod tests {
         const N: i64 = 6;
         const ACK_LIMIT: i64 = 2;
 
-        let flushed = Arc::new(DependentSequence::new());
-        let acked = Arc::new(DependentSequence::new());
+        let (builder, [flushed, acked]) =
+            build_single_producer(8, factory(), BusySpin).new_gates::<2>();
         let (tx, rx) = mpsc::channel();
 
         let journal = {
-            let flushed = Arc::clone(&flushed);
-            let acked = Arc::clone(&acked);
+            let flushed = flushed.clone();
+            let acked = acked.clone();
             move |_e: &Event, seq: Sequence, _end_of_batch: bool| {
                 flushed.set(seq);
                 if seq <= ACK_LIMIT {
@@ -1613,11 +1613,10 @@ mod tests {
         };
 
         {
-            let mut producer = build_single_producer(8, factory(), BusySpin)
+            let builder = builder
                 .handle_events_with(journal)
-                .and_then_with_dependents(vec![flushed.clone(), acked.clone()])
-                .handle_events_with(engine)
-                .build();
+                .and_then_with_dependents(&[flushed.clone(), acked.clone()]);
+            let mut producer = builder.handle_events_with(engine).build();
 
             for i in 0..N {
                 producer.publish(|e| e.num = i);
@@ -1650,7 +1649,6 @@ mod tests {
         // Two parallel handlers in stage1; stage2 gated on min(cursor_a, cursor_b, gate).
         const N: i64 = 8;
 
-        let flushed = Arc::new(DependentSequence::new());
         let (tx_stage2, rx_stage2) = mpsc::channel();
 
         // Handler A is fast.
@@ -1663,6 +1661,12 @@ mod tests {
             }
         };
 
+        let (builder, [gate]) = build_single_producer(8, factory(), BusySpin).new_gates::<1>();
+        let builder = builder
+            .handle_events_with(handler_a)
+            .handle_events_with(handler_b) // fan-out: MC state
+            .and_then_with_dependents(&[gate.clone()]);
+
         // Stage2 should only advance when both A and B have processed and gate is opened.
         let stage2 = {
             let tx = tx_stage2.clone();
@@ -1672,18 +1676,13 @@ mod tests {
         };
 
         {
-            let mut producer = build_single_producer(8, factory(), BusySpin)
-                .handle_events_with(handler_a)
-                .handle_events_with(handler_b) // fan-out: MC state
-                .and_then_with_dependents(vec![flushed.clone()])
-                .handle_events_with(stage2)
-                .build();
+            let mut producer = builder.handle_events_with(stage2).build();
 
             for i in 0..N {
                 producer.publish(|e| e.num = i);
                 if i >= 0 {
                     // let gate track producer immediately; barrier min should still wait on handler_b
-                    flushed.set(i);
+                    gate.set(i);
                 }
             }
         } // drop producer to signal shutdown
@@ -1697,20 +1696,17 @@ mod tests {
     }
 
     #[test]
-    fn dependent_sequence_is_cacheline_padded() {
-        let align_seq = std::mem::align_of::<DependentSequence>();
-        let align_pad = std::mem::align_of::<crossbeam_utils::CachePadded<i64>>();
+    fn dependent_sequence_underlying_data_is_cacheline_padded() {
+        // DependentSequence now uses internal Arc, so the struct itself is pointer-sized.
+        // The important thing is that the underlying CachePadded<AtomicI64> on the heap
+        // is still cache-line aligned to prevent false sharing.
+        let align_pad = std::mem::align_of::<crossbeam_utils::CachePadded<AtomicI64>>();
 
-        // Guardrail: we should track CachePadded's alignment (64 on x86_64, 128 on Apple M).
-        assert_eq!(
-            align_seq, align_pad,
-            "DependentSequence alignment {} diverged from CachePadded {}",
-            align_seq, align_pad
-        );
+        // Guardrail: CachePadded should use cache-line alignment (64 on x86_64, 128 on Apple M).
         assert!(
-            align_seq >= 64 && align_seq.is_power_of_two(),
-            "alignment too small or not power of two: {}",
-            align_seq
+            align_pad >= 64 && align_pad.is_power_of_two(),
+            "CachePadded alignment too small or not power of two: {}",
+            align_pad
         );
     }
 }

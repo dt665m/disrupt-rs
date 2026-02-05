@@ -1,4 +1,4 @@
-use disrupt_rs::{build_single_producer, BusySpin, DependentSequence, Producer, Sequence};
+use disrupt_rs::{build_single_producer, BusySpin, Producer, Sequence};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -25,9 +25,7 @@ fn apply_business_logic(_event: &Event) {
 fn main() {
     let factory = Event::default;
 
-    // External gate the handler will advance after fsync/ack.
-    let flushed = Arc::new(DependentSequence::new());
-
+    let (builder, [flushed]) = build_single_producer(1024, factory, BusySpin).new_gates::<1>();
     let last_flushed = Arc::new(AtomicU64::new(0));
     let last_applied = Arc::new(AtomicU64::new(0));
 
@@ -50,11 +48,10 @@ fn main() {
         }
     };
 
-    let mut producer = build_single_producer(1024, factory, BusySpin)
+    let builder = builder
         .handle_events_with(journal) // stage 1
-        .and_then_with_dependents(vec![flushed.clone()]) // stage boundary gated by external seq
-        .handle_events_with(engine) // stage 2
-        .build();
+        .and_then_with_dependents(&[flushed.clone()]); // stage boundary gated by external seq
+    let mut producer = builder.handle_events_with(engine).build(); // stage 2
 
     for i in 0..10u64 {
         producer.publish(|e| e.value = i);

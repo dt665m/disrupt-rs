@@ -1,6 +1,6 @@
 [package]
 name = "disrupt-rs"
-version = "1.0.1"
+version = "1.1.0"
 authors = ["Denis Tsai <denistsai@aetheras.io>"]
 description = "Concurrent Ringbuffer inspired by the LMAX Disruptor."
 repository = "https://github.com/dt665m/disrupt-rs"

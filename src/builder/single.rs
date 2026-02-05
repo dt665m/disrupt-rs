@@ -13,11 +13,19 @@ use crate::{
     },
     event_handler::{EventHandler, EventHandlerWithState},
     producer::single::{SingleProducer, SingleProducerBarrier},
+    sequence::DependentSequence,
+    sequence::GatedSequence,
     wait_strategies::WaitStrategy,
-    DependentSequence,
 };
 
 use super::{Builder, Shared, MC, NC, SC};
+
+type GateArray<const N: usize, W> = [GatedSequence<<W as WaitStrategy>::Notifier>; N];
+type SPGateResult<S, E, W, B, const N: usize> = (SPBuilder<S, E, W, B>, GateArray<N, W>);
+type SPPollerResult<S, E, W, B> = (
+    EventPoller<E, B, <W as WaitStrategy>::Notifier>,
+    SPBuilder<S, E, W, B>,
+);
 
 /// First step in building a Disruptor with a [SingleProducer].
 pub struct SPBuilder<State, E, W, B>
@@ -50,6 +58,34 @@ where
     }
 }
 
+impl<E, W, B, S> SPBuilder<S, E, W, B>
+where
+    E: 'static + Send + Sync,
+    W: 'static + WaitStrategy,
+    B: 'static + Barrier,
+{
+    /// Create new gated sequences tied to this builder's notifier.
+    ///
+    /// Use the returned gates to advance external dependencies. They automatically wake blocked
+    /// downstream consumers when advanced.
+    pub fn new_gates<const N: usize>(self) -> SPGateResult<S, E, W, B, N> {
+        let notifier = self.shared.notifier.clone();
+        let gating: [DependentSequence; N] = std::array::from_fn(|_| DependentSequence::new());
+        let gated_sequences: [GatedSequence<W::Notifier>; N] =
+            std::array::from_fn(|i| GatedSequence::new(gating[i].clone(), notifier.clone()));
+
+        (
+            SPBuilder {
+                state: PhantomData,
+                shared: self.shared,
+                producer_barrier: self.producer_barrier,
+                dependent_barrier: self.dependent_barrier,
+            },
+            gated_sequences,
+        )
+    }
+}
+
 impl<E, W, B> SPBuilder<NC, E, W, B>
 where
     E: 'static + Send + Sync,
@@ -76,7 +112,7 @@ where
     }
 
     /// Get an EventPoller.
-    pub fn event_poller(mut self) -> (EventPoller<E, B>, SPBuilder<SC, E, W, B>) {
+    pub fn event_poller(mut self) -> SPPollerResult<SC, E, W, B> {
         let event_poller = self.get_event_poller();
 
         (
@@ -150,7 +186,7 @@ where
     }
 
     /// Get an EventPoller.
-    pub fn event_poller(mut self) -> (EventPoller<E, B>, SPBuilder<MC, E, W, B>) {
+    pub fn event_poller(mut self) -> SPPollerResult<MC, E, W, B> {
         let event_poller = self.get_event_poller();
 
         (
@@ -170,6 +206,34 @@ where
         // Guaranteed to be present by construction.
         let consumer_cursors = self.shared().current_consumer_cursors.as_mut().unwrap();
         let dependent_barrier = Arc::new(SingleConsumerBarrier::new(consumer_cursors.remove(0)));
+
+        SPBuilder {
+            state: PhantomData,
+            shared: self.shared,
+            producer_barrier: self.producer_barrier,
+            dependent_barrier,
+        }
+    }
+
+    /// Complete consumption so far and gate the next stage on the current consumer plus gated sequences.
+    ///
+    /// Use the same gates you got from [`new_gates`](Self::new_gates) to advance external
+    /// dependencies. They automatically wake blocked downstream consumers.
+    pub fn and_then_with_dependents(
+        mut self,
+        gates: &[GatedSequence<W::Notifier>],
+    ) -> SPBuilder<NC, E, W, MultiConsumerDependentsBarrier> {
+        let consumer_cursors = self
+            .shared()
+            .current_consumer_cursors
+            .replace(vec![])
+            .unwrap();
+        let gating: Vec<DependentSequence> = gates.iter().map(|gate| gate.dependent()).collect();
+
+        let dependent_barrier = Arc::new(MultiConsumerDependentsBarrier::new(
+            consumer_cursors,
+            gating,
+        ));
 
         SPBuilder {
             state: PhantomData,
@@ -215,29 +279,6 @@ where
             dependent_barrier: self.dependent_barrier,
         }
     }
-
-    /// Complete consumption so far and gate the next stage on the current consumer plus extra sequences.
-    pub fn and_then_with_dependents(
-        mut self,
-        gating: Vec<Arc<DependentSequence>>,
-    ) -> SPBuilder<NC, E, W, MultiConsumerDependentsBarrier> {
-        let consumer_cursors = self
-            .shared()
-            .current_consumer_cursors
-            .replace(vec![])
-            .unwrap();
-        let dependent_barrier = Arc::new(MultiConsumerDependentsBarrier::new(
-            consumer_cursors,
-            gating,
-        ));
-
-        SPBuilder {
-            state: PhantomData,
-            shared: self.shared,
-            producer_barrier: self.producer_barrier,
-            dependent_barrier,
-        }
-    }
 }
 
 impl<E, W, B> SPBuilder<MC, E, W, B>
@@ -247,7 +288,7 @@ where
     B: 'static + Barrier,
 {
     /// Get an EventPoller.
-    pub fn event_poller(mut self) -> (EventPoller<E, B>, SPBuilder<MC, E, W, B>) {
+    pub fn event_poller(mut self) -> SPPollerResult<MC, E, W, B> {
         let event_poller = self.get_event_poller();
 
         (
@@ -307,16 +348,21 @@ where
     }
 
     /// Complete the (concurrent) consumption of events so far and gate the next stage on the slowest
-    /// consumer *and* the provided gating sequences.
+    /// consumer *and* the provided gated sequences.
+    ///
+    /// Use the same gates you got from [`new_gates`](Self::new_gates) to advance external
+    /// dependencies. They automatically wake blocked downstream consumers.
     pub fn and_then_with_dependents(
         mut self,
-        gating: Vec<Arc<DependentSequence>>,
+        gates: &[GatedSequence<W::Notifier>],
     ) -> SPBuilder<NC, E, W, MultiConsumerDependentsBarrier> {
         let consumer_cursors = self
             .shared()
             .current_consumer_cursors
             .replace(vec![])
             .unwrap();
+        let gating: Vec<DependentSequence> = gates.iter().map(|gate| gate.dependent()).collect();
+
         let dependent_barrier = Arc::new(MultiConsumerDependentsBarrier::new(
             consumer_cursors,
             gating,

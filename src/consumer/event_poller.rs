@@ -2,7 +2,7 @@ use crate::{
     barrier::Barrier,
     cursor::Cursor,
     ringbuffer::RingBuffer,
-    wait_strategies::{WaitOutcome, Waiter},
+    wait_strategies::{WaitOutcome, Waiter, WakeupNotifier},
     Sequence,
 };
 use crossbeam_utils::CachePadded;
@@ -16,6 +16,9 @@ use thiserror::Error;
 /// Use the EventPoller when you want to control your own thread
 /// (instead of letting the Disruptor manage it).
 /// The EventPoller supports batch reading and can be used to process events in a loop.
+///
+/// When the [`EventGuard`] is dropped, it advances the consumer cursor and wakes any
+/// downstream consumers that may be blocked (when using blocking wait strategies).
 ///
 /// ```
 ///# use disrupt_rs::*;
@@ -60,11 +63,12 @@ use thiserror::Error;
 ///     }
 /// }
 /// ```
-pub struct EventPoller<E, B> {
+pub struct EventPoller<E, B, N: WakeupNotifier = crate::wait_strategies::NoopWakeupNotifier> {
     ring_buffer: Arc<RingBuffer<E>>,
     dependent_barrier: Arc<B>,
     shutdown_at_sequence: Arc<CachePadded<AtomicI64>>,
     cursor: Arc<Cursor>,
+    notifier: N,
 }
 
 /// Error types that can occur if polling is unsuccessful.
@@ -82,13 +86,16 @@ pub enum Polling {
 /// It can be used as an iterator to read the published events and the dropping of the `EventGuard`
 /// will signal to the `Disruptor` that the reading is completed. This will allow other consumers or
 /// producers to advance.
-pub struct EventGuard<'p, E, B> {
-    parent: &'p mut EventPoller<E, B>,
+///
+/// On drop, the guard advances the consumer cursor and wakes any downstream consumers
+/// that may be blocked on this poller's progress.
+pub struct EventGuard<'p, E, B, N: WakeupNotifier = crate::wait_strategies::NoopWakeupNotifier> {
+    parent: &'p mut EventPoller<E, B, N>,
     sequence: Sequence,
     available: Sequence,
 }
 
-impl<E, B> EventGuard<'_, E, B> {
+impl<E, B, N: WakeupNotifier> EventGuard<'_, E, B, N> {
     /// Returns the number of events available to read.
     ///
     /// This is identical to the `ExactSizeIterator::len` implementation, but provided as an
@@ -112,7 +119,7 @@ impl<E, B> EventGuard<'_, E, B> {
 /// (And not the lifetime of the `EventPoller`. The latter would be catastrophic because a client
 /// could hold on to a reference to a en Event after the drop method was run for the
 /// `EventGuard` and a publisher could write to the immutable reference - UB.)
-impl<'g, E, B> Iterator for &'g mut EventGuard<'_, E, B> {
+impl<'g, E, B, N: WakeupNotifier> Iterator for &'g mut EventGuard<'_, E, B, N> {
     type Item = (Sequence, &'g E);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -129,37 +136,42 @@ impl<'g, E, B> Iterator for &'g mut EventGuard<'_, E, B> {
     }
 }
 
-impl<E, B> ExactSizeIterator for &mut EventGuard<'_, E, B> {
+impl<E, B, N: WakeupNotifier> ExactSizeIterator for &mut EventGuard<'_, E, B, N> {
     /// Returns the number of events available to read.
     fn len(&self) -> usize {
         (**self).len()
     }
 }
 
-impl<E, B> Drop for EventGuard<'_, E, B> {
+impl<E, B, N: WakeupNotifier> Drop for EventGuard<'_, E, B, N> {
     fn drop(&mut self) {
         // Signal to producers or later consumers that we're done processing `available` sequence.
         // Note, not all events in the range have to have been read.
         // (I.e. client code can skip reading any number events.)
         self.parent.cursor.store(self.available);
+        // Wake any blocking waiters that might be gated on this consumer's progress.
+        self.parent.notifier.wake();
     }
 }
 
-impl<E, B> EventPoller<E, B>
+impl<E, B, N> EventPoller<E, B, N>
 where
     B: Barrier,
+    N: WakeupNotifier,
 {
     pub(crate) fn new(
         ring_buffer: Arc<RingBuffer<E>>,
         dependent_barrier: Arc<B>,
         shutdown_at_sequence: Arc<CachePadded<AtomicI64>>,
         cursor: Arc<Cursor>,
+        notifier: N,
     ) -> Self {
         Self {
             ring_buffer,
             dependent_barrier,
             shutdown_at_sequence,
             cursor,
+            notifier,
         }
     }
 
@@ -203,7 +215,7 @@ where
     ///     Err(Polling::Shutdown) => { /* ... */ },
     /// };
     /// ```
-    pub fn poll(&mut self) -> Result<EventGuard<'_, E, B>, Polling> {
+    pub fn poll(&mut self) -> Result<EventGuard<'_, E, B, N>, Polling> {
         self.poll_take(u64::MAX)
     }
 
@@ -241,7 +253,7 @@ where
     ///     Err(Polling::Shutdown) => { /* ... */ },
     /// };
     /// ```
-    pub fn poll_take(&mut self, limit: u64) -> Result<EventGuard<'_, E, B>, Polling> {
+    pub fn poll_take(&mut self, limit: u64) -> Result<EventGuard<'_, E, B, N>, Polling> {
         let cursor_at = self.cursor.relaxed_value();
         let sequence = cursor_at + 1;
 
@@ -273,7 +285,10 @@ where
     ///
     /// If the waiter returns [`WaitOutcome::Timeout`], this returns [`Polling::NoEvents`] so the
     /// caller can do other work.
-    pub fn poll_wait(&mut self, waiter: &mut impl Waiter) -> Result<EventGuard<'_, E, B>, Polling> {
+    pub fn poll_wait(
+        &mut self,
+        waiter: &mut impl Waiter,
+    ) -> Result<EventGuard<'_, E, B, N>, Polling> {
         let sequence = self.cursor.relaxed_value() + 1;
 
         let available = match waiter.wait_for(
@@ -299,7 +314,7 @@ mod tests {
     use super::*;
     use crate::consumer::SingleConsumerBarrier;
     use crate::ringbuffer::RingBuffer;
-    use crate::wait_strategies::WaitStrategy;
+    use crate::wait_strategies::{NoopWakeupNotifier, WaitStrategy};
     use crate::Producer;
 
     #[test]
@@ -317,6 +332,7 @@ mod tests {
             barrier,
             Arc::clone(&shutdown),
             Arc::clone(&cursor),
+            NoopWakeupNotifier,
         );
 
         // Signal shutdown as if producer had advanced to sequence 0.
@@ -339,6 +355,7 @@ mod tests {
             barrier,
             Arc::clone(&shutdown),
             Arc::clone(&cursor),
+            NoopWakeupNotifier,
         );
 
         let shutdown_ref = shutdown.clone();
